@@ -2,11 +2,11 @@
 
 ## Current objective
 
-Phase 0 — repository reconnaissance. Fork upstream MTPLX, stand up a dev
-environment, run the existing test suite, run a real inference workload, and
-map the exact current source locations for everything the resource governor
-will hook into (scheduler, prefill, decode, MTP, batching, admission,
-config/CLI, admin API, health/stats, memory/KV accounting). See
+Phase 1 — minimal decode governor (brief section 33's "first useful
+milestone"): a working `ResourceGovernor` core, decode duty-cycle pacing
+hooked into the serial AR decode path, unit + real-MLX tests, negligible
+overhead at duty=1.0. Phase 0 (reconnaissance) is done — see
+`docs/resource-governor/IMPLEMENTATION_NOTES.md`. See
 `MTPLX_RESOURCE_GOVERNOR_CODEX_BRIEF.md` for the full spec.
 
 ## In progress
@@ -31,12 +31,19 @@ config/CLI, admin API, health/stats, memory/KV accounting). See
       changes admission behavior on a running server — these two keys are
       *not* currently in `DASHBOARD_MUTABLE_SETTINGS_KEYS`
       (`openai.py:15137-15155`), unlike `prefill_chunk_tokens`.
-- [ ] Push `feature/resource-governor` branch to the fork
-      (`digitalgravy/MTPLX`) and commit Phase 0 documentation
-      (`chore: document resource governor architecture`).
-- [ ] Begin Phase 1: minimal `ResourceGovernor` core + decode duty-cycle
-      pacing on the serial AR decode path, per brief section 33 (first
-      useful milestone).
+- [ ] Validate the decode governor hook against a real downloaded model
+      once disk space allows (currently only validated against a toy MLX
+      model — see "Completed" below).
+- [ ] Hook `after_decode_step` into the `MTPLX_AR_PIPELINE` lane and the
+      MTP (`generate_mtpk`) / batched (`batched_decode.py`) decode paths
+      (Phase 1 only covers the classic/default AR loop).
+- [ ] Phase 2: prefill governor (`after_prefill_chunk` hooked into
+      `_prefill_with_hidden_sequence`'s chunk loop, `generation.py:5655+`).
+- [ ] Phase 3: runtime admin API (`GET/PUT` equivalents of
+      `/v1/mtplx/settings`, extended for governor knobs) + live profile
+      switching.
+- [ ] Phase 4: CLI (`--resource-profile`, `--prefill-duty-cycle`,
+      `--decode-duty-cycle`, `--min-decode-tps`) + persisted config.
 
 ## Completed
 
@@ -76,6 +83,60 @@ config/CLI, admin API, health/stats, memory/KV accounting). See
       complete, reusable memory-budgeting system; `MTPLX_EVAL_AUDIT` is a
       built-in per-eval timing/audit log useful for verifying yield
       placement empirically later.
+
+- [x] Phase 1 — minimal decode governor implemented and tested:
+  - `mtplx/resource_governor.py`: `ResourceProfile` (validated duty cycles,
+    frozen dataclass) + `ResourceGovernor` (thread-safe profile
+    get/set, `after_decode_step`/`after_prefill_chunk` duty-cycle pacing,
+    `min_decode_tps` floor with EMA-smoothed engage/disengage to avoid
+    oscillation, capped/clamped/non-negative sleep, interruptible
+    small-slice yield polling `abort_check`, `admission_allowed()`,
+    `stats()`). Built-in `max`/`balanced`/`interactive`/`protect`/`pause`
+    profiles per brief section 9 (values are starting-point hypotheses,
+    not tuned claims, per brief section 32). Zero MLX dependency — pure
+    stdlib, keeps `test_no_mlx_imports.py`-style guarantees intact.
+  - **Deliberate API deviation from the brief**, documented in the
+    module docstring: `after_decode_step`/`after_prefill_chunk` are
+    synchronous, not `async def` — the decode loop they hook
+    (`generate_ar` in `mtplx/generation.py`) runs synchronously on
+    MTPLX's single owner thread with no event loop at the call site;
+    converting it to async would be exactly the invasive scheduler
+    change the brief says to avoid.
+  - Hooked into `generate_ar`'s classic/default AR decode loop
+    (`generation.py:5951+`) via a new optional `resource_governor`
+    keyword parameter (default `None` — existing call sites unchanged,
+    zero behavior change when unset). The pacing call sits right after
+    the loop's existing `_eval()`/`mx.async_eval()` dispatch, so on the
+    shipped default (`_ar_sync_eval=True`) it's a real post-GPU-dispatch
+    boundary, not a guess (see IMPLEMENTATION_NOTES.md Q3/Q5). Only the
+    classic AR lane is hooked so far — the opt-in `MTPLX_AR_PIPELINE`
+    lane, MTP (`generate_mtpk`), and batched decode are not yet wired
+    (tracked in "Next up").
+  - Tests: `tests/test_resource_governor.py` (25 unit tests, pure timing
+    math — validation, duty-cycle formula, upper-bound cap, min-tps
+    floor engage/disengage/oscillation-avoidance, cancellation slicing,
+    stats shape) and `tests/test_resource_governor_ar_integration.py` (6
+    tests running `generate_ar` against a toy MLX model — real MLX
+    compute on this machine, same pattern as the existing
+    `tests/test_async_decode.py`): confirms governor-off and
+    governor-at-max-profile produce byte-identical output to the
+    ungoverned baseline, confirms throttled output is *also* identical
+    (brief section 18 — pacing must not change model output), confirms
+    wall-clock time actually increases under throttling, and confirms
+    `abort_check` cuts an in-progress yield short rather than blocking
+    generation.
+  - Ran the new tests plus ~48 existing test files that exercise
+    `generate_ar`/`generation.py` (every test file found via
+    `grep -rl generate_ar tests/`) — only the same pre-existing,
+    already-documented RAM-preflight failure
+    (`test_laguna_model.py`) appeared; nothing else regressed.
+  - **Not yet done**: validation against a real downloaded model (still
+    blocked on disk space — the toy-model integration tests are real MLX
+    execution but not a production-scale model); the "real inference
+    demonstrates the expected throughput/pacing difference" half of
+    brief section 33's milestone-1 definition needs that. Duty-cycle
+    values have not been benchmarked/tuned on real hardware (brief
+    section 19 Test A-C) — not applicable until Phase 8.
 
 ## Blocked / needs investigation
 

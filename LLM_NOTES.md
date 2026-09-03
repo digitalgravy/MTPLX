@@ -269,18 +269,22 @@ governor code; don't re-derive this from scratch. Highlights not to lose:
   separate `threading.Event`-based cancellation primitive in the
   not-yet-live `batching/state.py` scaffold — don't conflate the two.)
 
-**Usage gotcha discovered empirically**: `MTPLX_EVAL_AUDIT` (`generation.py:209`)
-is a **file path**, not a boolean flag — the reconnaissance fork set it to
-`"1"` expecting boolean-style enable/disable, and MTPLX dutifully wrote real
-per-eval JSONL timing entries to a file literally named `1` in the repo
-root (found and deleted this session — it's not meaningful project state,
-just confirms the mechanism works). To use it for real: set it to an
-actual file path, e.g. `MTPLX_EVAL_AUDIT=/tmp/eval_audit.jsonl`. The
-captured entries (from some small-scale run, shapes like `[1,1,4]`) show
-`_prefill`/`generate_ar`/`_sample_from_logits` each producing a `_eval()`
-call in the tens-of-microseconds range at that toy scale — confirms the
-instrumentation itself works end-to-end; not meaningful as a timing
-baseline since it wasn't a real model.
+**Usage gotcha discovered empirically, and it recurs**: `MTPLX_EVAL_AUDIT`
+(`generation.py:209`) is a **file path**, not a boolean flag. This bit the
+reconnaissance fork once (it set `"1"` expecting boolean-style
+enable/disable) and then bit the local test suite a second time,
+independently: `tests/test_async_decode.py::test_eval_audit_forces_synchronous`
+(an existing, not-project-owned test) does `monkeypatch.setenv("MTPLX_EVAL_AUDIT", "1")`
+and MTPLX dutifully writes real per-eval JSONL entries to a file literally
+named `1` in whatever the process's cwd is — the repo root, when pytest is
+run from there. **Any full or partial test-suite run that includes that
+test will recreate this stray `1` file** — check `git status` before
+committing and delete it (`rm -f ./1`), it's never meaningful project
+state, just proof the instrumentation fires. Not something to "fix" as
+part of this project (it's an existing test's behavior, harmless, just
+untidy) — just remember to look for it. To use `MTPLX_EVAL_AUDIT` for real
+governor-timing verification, set it to an actual path, e.g.
+`MTPLX_EVAL_AUDIT=/tmp/eval_audit.jsonl`.
 
 **Not yet done, explicitly flagged in the doc** (brief section 25 requires
 this before trusting any hook, and it's the natural next step once disk
@@ -301,27 +305,73 @@ task while other background work is also in flight, make the prompt
 unmistakable that the fork itself is the one doing the primary work, not
 supervising.
 
+## Session 1 continued — Phase 1 (same day)
+
+Implemented and tested the minimal decode governor. Full detail is in
+PROJECT_STATUS.md's Phase 1 "Completed" entry; key things not to
+rediscover:
+
+- `mtplx/resource_governor.py` is a new, standalone, MLX-free module.
+  Deliberately synchronous (not the brief's illustrative `async def`) —
+  see the module docstring for why; don't "fix" this to be async without
+  re-reading that rationale first, it was a considered decision not an
+  oversight.
+- The hook lives in `generate_ar`'s **classic AR loop only**
+  (`generation.py`, right after the per-token `_eval()`/`async_eval()`
+  dispatch). The `MTPLX_AR_PIPELINE` lane, `generate_mtpk` (MTP), and
+  `batched_decode.py` are NOT hooked yet — this was a deliberate Phase 1
+  scope cut (brief section 33 only asks for "serial AR decode"), not
+  missed work. Do them as their own small, testable commits per brief
+  section 26's discipline, not bundled together.
+- Validated with two test files: `tests/test_resource_governor.py` (pure
+  timing-math unit tests, no MLX) and
+  `tests/test_resource_governor_ar_integration.py` (real MLX compute via
+  a toy model, same pattern `tests/test_async_decode.py` already uses).
+  The toy-model tests are genuine MLX execution on this machine, but
+  they are not a substitute for validating against a real downloaded
+  model — that's still blocked on disk space and still needs doing
+  before fully trusting this hook (brief section 25).
+- Ran the new tests against ~48 existing test files that touch
+  `generate_ar`/`generation.py` to check for regressions from the new
+  `resource_governor` parameter. Only the same pre-existing
+  `test_laguna_model.py` RAM-preflight failure showed up — nothing new
+  broke.
+- **Recurring gotcha**: running `tests/test_async_decode.py::test_eval_audit_forces_synchronous`
+  (as part of any batch that includes it) drops a stray file named `1`
+  in the repo root every time (see the `MTPLX_EVAL_AUDIT` gotcha note
+  above). Check `git status` and `rm -f ./1` before committing if you've
+  run tests since the last commit.
+
 ### Unresolved questions / exact next action for a fresh session
 
-Phase 0 is essentially done. If you're picking this up cold:
+Phase 0 is done; Phase 1 (minimal decode governor, classic AR lane only)
+is done and committed. If you're picking this up cold:
 
-1. Read `docs/resource-governor/IMPLEMENTATION_NOTES.md` in full — don't
-   redo this reconnaissance, it's solid.
+1. Read `docs/resource-governor/IMPLEMENTATION_NOTES.md` and this file's
+   "Phase 1" section above in full before writing more governor code —
+   don't redo the reconnaissance or re-derive the async-vs-sync API
+   decision, both are already settled.
 2. Check current disk space (`df -h /`). If there's now >5-10GB free,
    retry `mtplx pull Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed` then
    `mtplx run "hello" --model Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed`
-   to close out the one remaining Phase 0 item (real inference workload
-   validation). If disk is still tight, ask the user rather than guessing.
-3. Commit Phase 0 docs (`IMPLEMENTATION_NOTES.md`, `PROJECT_STATUS.md`,
-   `LLM_NOTES.md`) as `chore: document resource governor architecture`
-   (brief section 26's suggested commit sequence) and push
-   `feature/resource-governor` to `origin` (the fork).
-4. Move into Phase 1: minimal `ResourceGovernor` core + decode duty-cycle
-   pacing on the serial AR decode path (brief section 33's "first useful
-   milestone"). Hook point: right after the existing decode sync points in
-   `generate_ar()` (`generation.py:5951+`) — see IMPLEMENTATION_NOTES.md
-   section 2, Q5.
-5. Do not start writing `ResourceGovernor` code before reading
-   IMPLEMENTATION_NOTES.md — the brief is explicit and repeated about this
-   ("Do not begin broad changes until this is complete"), and it's now
-   actually available.
+   with a `resource_governor` wired in, to get the real-model validation
+   Phase 1 is still missing. If disk is still tight, ask the user rather
+   than guessing.
+3. Pick the next concrete slice rather than a big bundled patch (brief
+   section 26 discipline: small, testable, separately-committed changes):
+   - Hook `after_decode_step` into the `MTPLX_AR_PIPELINE` lane
+     (`generation.py`, the `_lane_step`/`while True:` block around line
+     6230-6335) — the real sync point there is `tok_lazy.item()`
+     (`generation.py:6265`-ish; re-check the exact line, code has moved).
+   - Or start Phase 2 (prefill governor): hook `after_prefill_chunk` into
+     `_prefill_with_hidden_sequence`'s chunk loop
+     (`generation.py:5655-5733`), right after its existing
+     `_eval(chunk_logits, chunk_hidden)` call — same pattern as decode,
+     see IMPLEMENTATION_NOTES.md section 1 "Sustained/chunked prefill".
+   - Either is reasonable to do next; MTP (`generate_mtpk`) and batched
+     decode are bigger lifts (bigger functions, less-traced sync
+     boundaries per IMPLEMENTATION_NOTES.md Q6/Q7) — save those for after
+     one of the above is solid.
+4. Keep committing docs (`PROJECT_STATUS.md`/`LLM_NOTES.md`) as you go,
+   not just at the end of a session — brief section 28 is explicit about
+   this ("Do not wait until the end of a session").

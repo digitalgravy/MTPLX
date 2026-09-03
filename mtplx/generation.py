@@ -81,6 +81,7 @@ from .qsa_mtp_precompute import (
     qsa_mtp_outer_device_core_supported,
     qsa_mtp_precompute_enabled,
 )
+from .resource_governor import ResourceGovernor
 from .runtime import MTPLXRuntime
 from .sampling import (
     SamplerConfig,
@@ -5972,6 +5973,7 @@ def generate_ar(
     session_policy_fingerprint: str | None = None,
     capture_final_state: bool = False,
     abort_check: Callable[[], bool] | None = None,
+    resource_governor: ResourceGovernor | None = None,
 ) -> GenerationOutput:
     reject_non_k1_a3b_whole_moe_request(rt, entrypoint="generate_ar")
     if getattr(rt, "backend_id", None) == "gemma4_assistant":
@@ -6456,6 +6458,17 @@ def generate_ar(
         target_forward_graph_time += forward_graph_elapsed
         target_eval_time += eval_elapsed
         verify_calls += 1
+        if resource_governor is not None:
+            # Pace right after the sync point above (real GPU dispatch when
+            # _ar_sync_eval is True, the shipped default — see
+            # docs/resource-governor/IMPLEMENTATION_NOTES.md section 2, Q3/Q5)
+            # so the yield creates genuine scheduling headroom rather than
+            # delaying work that hasn't actually reached the GPU yet.
+            resource_governor.after_decode_step(
+                work_seconds=elapsed_decode,
+                produced_tokens=1,
+                abort_check=abort_check,
+            )
         logits = logits_next[:, -1, :]
 
     if token_callback is not None and _stream_gate.window > 0:
