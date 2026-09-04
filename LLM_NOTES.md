@@ -564,12 +564,27 @@ section 6 and PROJECT_STATUS.md; two things worth not rediscovering:
   same careful independent verification before touching, not a quick
   addition.
 
+## Session 1 continued — basic admission enforcement (same day)
+
+Added `_reject_if_resource_governor_admission_closed(state)` to
+`server/openai.py`, called at the very top of both
+`/v1/chat/completions` and `/v1/completions`. `protect`/`pause` profiles
+now return a real `503` before any generation work starts; everything
+else passes through. This is intentionally the *simple* half of Phase
+5/6 — did not touch concurrency mutation or memory-pressure admission,
+both flagged by the brief as safe to defer when architecturally risky.
+Validated live against the real model (503 in `protect`, 200 in `max`).
+If you resume Phase 6 later, this function is the natural place a
+memory-pressure check would also live (call it or extend it, don't build
+a parallel admission gate).
+
 ### Unresolved questions / exact next action for a fresh session
 
-Phases 0-4, the MTP decode hook, the AR pipeline lane, and all reachable
-prefill functions are done, tested, and pushed. Decode/prefill coverage
-is complete for every path a real `mtplx serve` request can take in AR or
-MTP mode. If you're picking this up cold:
+Phases 0-4, the MTP decode hook, the AR pipeline lane, all reachable
+prefill functions, and basic admission enforcement are done, tested, and
+pushed. Decode/prefill coverage is complete for every path a real
+`mtplx serve` request can take in AR or MTP mode. If you're picking this
+up cold:
 
 1. Read `docs/resource-governor/IMPLEMENTATION_NOTES.md` in full and this
    file's session notes above before writing more governor code — all

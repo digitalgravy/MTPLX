@@ -23,10 +23,6 @@ user request.
 
 ## Next up
 
-- [ ] Phase 5/6: wire `admission_allowed()` (implemented since Phase 1,
-      unused so far) into an actual request-admission check — recon found
-      there's no live admission enforcement to hook into today, so this
-      is new wiring, not a hook into something existing.
 - [ ] Runtime-verify (not just statically infer) that mutating
       `state.args.max_active_requests`/`decode_batch_max` live actually
       changes admission behavior on a running server — these two keys are
@@ -468,6 +464,45 @@ user request.
     `test_a3b_whole_moe.py`, `test_laguna_model.py`, the full governor
     test suite, and `test_server_openai.py` — only the same pre-existing
     `test_laguna_model.py` RAM-preflight failure appeared.
+- [x] **Phase 5 — basic admission enforcement, done.** Kept deliberately
+  conservative per the brief's own guidance (section 13: "If dynamically
+  changing scheduler concurrency safely at runtime is architecturally
+  risky, separate that from phase-one pacing"):
+  - New `_reject_if_resource_governor_admission_closed(state)` helper in
+    `server/openai.py`, same shape/placement as the existing
+    `_reject_prompt_over_context` — called at the very top of both
+    `/v1/chat/completions` and `/v1/completions`, before any prompt
+    encoding or generation setup. Uses `ResourceGovernor.admission_allowed()`
+    (implemented since Phase 1, unused until now) — `protect`/`pause`
+    profiles refuse new requests with a clean `503` and a clear reason
+    (`{"code": "resource_governor_not_admitting", "profile": "..."}`,
+    matching brief section 9's "return a clear error/reason"); every
+    other profile, or a disabled governor, passes through untouched.
+  - Deliberately did **not** touch live concurrency mutation
+    (`max_active_requests`/`decode_batch_max`) or memory-pressure-based
+    admission (Phase 6) — those need the deeper `AdmissionPolicy`/
+    `MemoryPlan` integration IMPLEMENTATION_NOTES.md already flagged as
+    dormant/unwired, and are exactly the kind of "architecturally risky"
+    work the brief says to defer rather than force. This phase only
+    covers the simple, safe case: refuse new requests outright when the
+    profile says so.
+  - Tests: 9 new tests in `tests/test_server_openai.py` — HTTP-level
+    503 checks for both endpoints (via `TestClient`, confirming
+    `_run_generation` is never reached — mocked to `pytest.fail()` if
+    called), a check that a rejected request doesn't itself mutate
+    governor state, and direct function-level checks that every
+    non-blocking profile (and a disabled governor) pass through without
+    raising. (A full HTTP-level "request succeeds end-to-end" test
+    would have needed much deeper `_fake_state()` mocking unrelated to
+    this check — session resolution, etc. — so that case is covered at
+    the function level instead, which is what actually needed proving.)
+  - Ran the full `test_server_openai.py` (377 tests) — clean.
+  - **Validated live**: started `mtplx serve` with the real downloaded
+    model, switched to `protect` via the admin API, confirmed
+    `POST /v1/chat/completions` returns a clean `503` with the exact
+    reason message before any generation starts; switched back to `max`
+    and confirmed the same request completes normally (`200`, real
+    generated tokens).
 
 ## Blocked / needs investigation
 

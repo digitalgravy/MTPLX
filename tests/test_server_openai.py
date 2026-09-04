@@ -14098,3 +14098,84 @@ def test_resolve_resource_governor_profile_invalid_duty_cycle_override_raises():
     )
     with pytest.raises(ValueError):
         openai._resolve_resource_governor_profile(args)
+
+
+# ---- resource governor admission enforcement (docs/resource-governor/) --
+
+
+def test_chat_completions_admission_closed_returns_503_without_generation(monkeypatch):
+    state = _fake_state()
+    state.resource_governor.set_profile("protect")
+    client = TestClient(create_app(state))
+    monkeypatch.setattr(
+        openai,
+        "_run_generation",
+        lambda *_args, **_kwargs: pytest.fail(
+            "admission-closed request must not reach _run_generation"
+        ),
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4},
+    )
+
+    assert response.status_code == 503
+    body = response.json()["error"]["message"]
+    assert "protect" in body
+    assert "resource governor" in body
+
+
+def test_completions_admission_closed_returns_503_without_generation(monkeypatch):
+    state = _fake_state()
+    state.resource_governor.set_profile("pause")
+    client = TestClient(create_app(state))
+    monkeypatch.setattr(
+        openai,
+        "_run_generation",
+        lambda *_args, **_kwargs: pytest.fail(
+            "admission-closed request must not reach _run_generation"
+        ),
+    )
+
+    response = client.post(
+        "/v1/completions", json={"prompt": "hi", "max_tokens": 4}
+    )
+
+    assert response.status_code == 503
+    assert "pause" in response.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("profile_name", ["max", "balanced", "interactive"])
+def test_admission_open_profiles_do_not_raise(profile_name):
+    # Complements the HTTP-level 503 tests above: reaching all the way to
+    # _run_generation through TestClient needs far more of _fake_state()
+    # mocked out than this check cares about (session resolution, etc.) —
+    # _reject_if_resource_governor_admission_closed is a pure function of
+    # state, so call it directly to prove every non-admission-closing
+    # profile passes through without raising.
+    state = _fake_state()
+    state.resource_governor.set_profile(profile_name)
+    openai._reject_if_resource_governor_admission_closed(state)  # must not raise
+
+
+def test_admission_disabled_governor_never_blocks():
+    state = _fake_state()
+    state.resource_governor.set_profile("protect")
+    state.resource_governor.set_enabled(False)
+    openai._reject_if_resource_governor_admission_closed(state)  # must not raise
+
+
+def test_admission_closed_does_not_mutate_governor_state():
+    state = _fake_state()
+    state.resource_governor.set_profile("protect")
+    client = TestClient(create_app(state))
+
+    client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4},
+    )
+
+    # A rejected request must not itself count as governor activity.
+    assert state.resource_governor.current_profile().name == "protect"
+    assert state.resource_governor.stats()["decode"]["steps"] == 0

@@ -20447,6 +20447,34 @@ def _uncapped_response_lease_tokens_from_env() -> int | None:
         return None
 
 
+def _reject_if_resource_governor_admission_closed(state: ServerState) -> None:
+    """Refuse a new inference request (503) when the active resource-governor
+    profile has stopped admitting new work (brief section 4/9: `protect`
+    and `pause` profiles). A disabled governor, or any other profile, never
+    blocks admission — see ResourceGovernor.admission_allowed().
+
+    Called early in the chat/completions handlers, same shape as
+    _reject_prompt_over_context: a real, clear error before any prefill or
+    decode work starts, not a silent stall or a swallowed exception.
+    """
+    if state.resource_governor.admission_allowed():
+        return
+    profile = state.resource_governor.current_profile()
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "message": (
+                f"the resource governor's active profile ({profile.name!r}) "
+                "is not admitting new inference requests right now. Switch "
+                "profiles via POST /admin/resource-governor/profile, or "
+                "retry later."
+            ),
+            "code": "resource_governor_not_admitting",
+            "profile": profile.name,
+        },
+    )
+
+
 def _reject_prompt_over_context(state: ServerState, prompt_token_count: int) -> None:
     """Refuse prompts the serve cannot hold (400) or honestly fit (507).
 
@@ -28496,6 +28524,7 @@ def create_app(state: ServerState) -> FastAPI:
     ) -> Any:
         if not request.messages:
             raise HTTPException(status_code=400, detail="messages must not be empty")
+        _reject_if_resource_governor_admission_closed(state)
         if bool(request.logprobs) or int(request.top_logprobs or 0) > 0:
             raise HTTPException(
                 status_code=400,
@@ -33025,6 +33054,7 @@ def create_app(state: ServerState) -> FastAPI:
 
     @app.post("/v1/completions")
     async def completions(raw_request: Request, request: CompletionRequest) -> Any:
+        _reject_if_resource_governor_admission_closed(state)
         headers = dict(raw_request.headers)
         raw_metadata = _request_extra(request, "metadata", {})
         metadata = raw_metadata if isinstance(raw_metadata, Mapping) else {}
