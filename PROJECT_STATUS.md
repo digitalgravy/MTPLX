@@ -10,9 +10,11 @@ enforcement, the `mtplx-qos` companion tool) is done and tested. Full
 documentation suite is written (`README.md`, `ARCHITECTURE.md`,
 `PLAIN_LANGUAGE_GUIDE.md`, `BENCHMARKS.md`, `UPSTREAM_STATUS.md`, plus
 `IMPLEMENTATION_NOTES.md`). An external community tester installed the
-fork, hit and helped debug three real install/PATH gotchas (all now
-documented — see "Install-flow issues found by a real user" below), and
-then ran an actual Moonlight session: **0.64 FPS (unplayable) at `max` →
+fork, hit and helped debug three install/PATH gotchas plus one genuine
+code bug (`--resource-profile` and friends were parsed but never
+forwarded to the actual server subprocess — now fixed; see
+"Install-flow issues found by a real user" below for all four), and then
+ran an actual Moonlight session: **0.64 FPS (unplayable) at `max` →
 90 FPS decode / 60 FPS rendered at `interactive`**. See
 `BENCHMARKS.md`'s "Real Moonlight test" entry — this is the first actual
 evidence the project's north-star claim holds, even on non-target
@@ -32,10 +34,10 @@ A3B batched lane) — plus a newly-requested basic UI for the admin API
 ## Install-flow issues found by a real user (2026-09-04)
 
 An external tester (first person other than this session to install and
-run the fork) hit four real problems in sequence, none of them governor
-bugs — all fixed in docs, and worth keeping listed here since they're
-the kind of thing that will keep recurring for new installers regardless
-of how good the docs get:
+run the fork) hit four real problems in sequence — three environment/docs
+issues, and one genuine code bug this session initially misdiagnosed as
+a fourth environment issue before the tester pushed back with "it's got
+the cli flag thing wrong" and fresh evidence:
 
 1. **PATH shadowing**: official MTPLX installs put a launcher shim on
    `PATH` that always execs one specific, separately-managed Python
@@ -54,21 +56,40 @@ of how good the docs get:
    earlier in the same session can keep using the stale cached location.
    `hash -r` fixes it; calling the venv's `mtplx` by absolute path
    sidesteps it entirely and always works.
-4. **Stale background server**: `mtplx serve` correctly refuses to start
-   a second server on an already-bound port (`error: port 8000 is
-   already in use`) rather than silently ignoring new CLI flags — but if
-   you don't notice that error, it looks exactly like "the flag did
-   nothing," because an *earlier* successful `mtplx serve` invocation is
-   still running and answering every request. `mtplx stop` first,
-   then a fresh `mtplx serve --resource-profile ...` applies cleanly.
-   Confirmed by reading `mtplx/commands/public.py`'s port-busy handling
-   directly rather than guessing.
+4. **Real code bug — `--resource-profile` and friends were parsed but
+   never forwarded to the actual server process.** `mtplx serve` doesn't
+   run the FastAPI server in-process; `cmd_serve_public` spawns it as a
+   subprocess with a hand-built argv (`sys.executable -m mtplx.server.openai
+   ...`), and Phase 4 added the new flags to both CLI parsers but never
+   added them to *this* forwarding list — so the flag parsed cleanly, the
+   server "started just fine," and then always booted on `max` regardless
+   of what was requested. The initial diagnosis (a stale server already
+   bound to the port) was wrong and the tester correctly said so ("I
+   never encounter an error where port 8000 is already bound... it starts
+   just fine, but the [profile] reports [max] until manually changed").
+   Found for real by reading `cmd_serve_public`'s subprocess-spawn code
+   directly — it has an explicit comment warning about exactly this bug
+   class ("the server runs as a subprocess with an explicitly rebuilt
+   argv, so anything not forwarded here never reaches it") sitting right
+   above the existing forwarding loop for sibling flags
+   (`max_active_requests`, `decode_batch_max`, etc.) that should have been
+   the template from the start. Two more instances of the identical bug
+   found and fixed alongside it: `_with_batching_args` (the `mtplx start`
+   → serve namespace handoff — same flags missing there too, would affect
+   `start`/`start pi`/`start opencode`/etc.) and `_batching_command_suffix`
+   (an advisory command string shown to users, cosmetic but same fix).
+   Regression-tested by proving the new tests fail against the pre-fix
+   code (not just pass against the fix) and confirmed live: a server
+   started with `--resource-profile interactive` now reports
+   `"profile":"interactive"` immediately, with `steps: 0` proving it's a
+   genuinely fresh, correctly-configured process.
 
-All four are now documented in `docs/resource-governor/README.md`'s
-Install section. None required a code change — they're entirely about
-the gap between "works when I run it" and "works when someone else,
-with their own pre-existing install history and shell session state,
-runs it." Worth remembering for any future user-facing doc: the failure
+Items 1-3 are documented in `docs/resource-governor/README.md`'s Install
+section and needed no code change. Item 4 needed a real fix — the lesson
+from the wrong initial diagnosis: when an install/environment
+explanation doesn't quite fit what the user is actually reporting, go
+read the specific code path involved rather than defending the first
+theory. Worth remembering for any future user-facing doc: the failure
 mode that actually happens is rarely the one you'd predict from a clean
 test.
 
@@ -722,6 +743,34 @@ recorded for completeness per brief section 25's testing discipline.
   project) — worth a `git bisect`-style narrowing if the user wants to
   fix it, or just avoid chaining ad-hoc file lists after that specific
   smoke subset in one pytest invocation.
+- **New, found by a real external user (2026-09-04), in scope, fixed**:
+  `mtplx serve --resource-profile interactive` (and the equivalent
+  `--prefill-duty-cycle`/`--decode-duty-cycle`/`--min-decode-tps` flags)
+  parsed fine and the server "started just fine," but the spawned server
+  subprocess silently booted on the default `max` profile anyway — the
+  flags never actually reached the running server. Root cause:
+  `cmd_serve_public` (`mtplx/commands/public.py`) doesn't run the server
+  in-process; it spawns it via `sys.executable -P -m mtplx.server.openai
+  ...` with a hand-built subprocess argv (`cmd = [...]`), and these 4
+  resource-governor flags were never added to that forwarding list (there
+  is a pre-existing code comment on this exact pattern warning that
+  anything not explicitly forwarded there never reaches the server — the
+  Phase 4 hook work should have followed it as a template and didn't).
+  Same bug class also existed in `_with_batching_args` (the `mtplx
+  start`→`serve` namespace handoff used by `start pi/opencode/swival/
+  hermes/...`) and `_batching_command_suffix` (the advisory copy-paste
+  command string). Fixed in all 3 locations; regression-tested in
+  `tests/test_public_cli.py` (4 new tests, confirmed to fail against the
+  pre-fix code via `git stash`) and live-verified end-to-end (a fresh
+  `mtplx serve --resource-profile interactive` immediately reporting
+  `"profile":"interactive"` with `"steps":0` via
+  `GET /admin/resource-governor`). My first diagnosis of the user's
+  report — a stale background server absorbing requests while a
+  port-conflict error silently killed new ones — was wrong; the user
+  correctly pushed back ("I never encounter an error where port 8000 is
+  already bound... it starts just fine, but the reports [go] nuts until
+  manually changed"), which is what prompted re-reading the actual
+  subprocess-spawn code instead of re-asserting the first theory.
 
 ## Benchmark backlog
 

@@ -9556,6 +9556,15 @@ def cmd_serve_public(args: Any) -> int:
         ("decode_batch_max", "--decode-batch-max"),
         ("batch_wait_ms", "--batch-wait-ms"),
         ("prefill_chunk_tokens", "--prefill-chunk-tokens"),
+        # Resource governor (docs/resource-governor/): the server subprocess
+        # has its own copy of these flags (see server/openai.py's parse_args)
+        # and otherwise always boots on the "max" profile regardless of what
+        # was passed to `mtplx serve` — see the comment right below on why
+        # anything not explicitly forwarded here never reaches it.
+        ("resource_profile", "--resource-profile"),
+        ("prefill_duty_cycle", "--prefill-duty-cycle"),
+        ("decode_duty_cycle", "--decode-duty-cycle"),
+        ("min_decode_tps", "--min-decode-tps"),
     ):
         value = getattr(args, attr, None)
         if value is not None:
@@ -11367,6 +11376,10 @@ def _batching_command_suffix(args: Any) -> str:
         ("decode_batch_max", "--decode-batch-max"),
         ("batch_wait_ms", "--batch-wait-ms"),
         ("prefill_chunk_tokens", "--prefill-chunk-tokens"),
+        ("resource_profile", "--resource-profile"),
+        ("prefill_duty_cycle", "--prefill-duty-cycle"),
+        ("decode_duty_cycle", "--decode-duty-cycle"),
+        ("min_decode_tps", "--min-decode-tps"),
     ):
         value = getattr(args, attr, None)
         if value is not None:
@@ -12746,6 +12759,14 @@ def _with_batching_args(target: Any, source: Any) -> Any:
         ("ssd_session_cache_dir", None),
         ("ssd_session_cache_max_size", None),
         ("ssd_session_cache_min_prefix_tokens", 512),
+        # Resource governor (docs/resource-governor/): without these, `mtplx
+        # start` and its sub-flows (start pi/opencode/swival/hermes/...) drop
+        # --resource-profile and friends during the quickstart -> serve
+        # namespace handoff, even though `mtplx serve` itself accepts them.
+        ("resource_profile", None),
+        ("prefill_duty_cycle", None),
+        ("decode_duty_cycle", None),
+        ("min_decode_tps", None),
     ):
         setattr(target, attr, getattr(source, attr, default))
     return target

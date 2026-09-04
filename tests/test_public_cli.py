@@ -1668,6 +1668,97 @@ def test_serve_forwards_retrieval_flags_to_the_server_command(
     assert "--retrieval-trust-remote-code" in command
 
 
+def test_serve_forwards_resource_governor_flags_to_the_server_command(
+    monkeypatch, tmp_path, capsys
+):
+    """Regression for a real bug (found by an external user, 2026-09-04):
+    `mtplx serve --resource-profile interactive` parsed fine and "started
+    just fine", but the spawned server subprocess silently booted on the
+    default `max` profile anyway, because these flags were never added to
+    the hand-built subprocess argv (same class of bug the retrieval-flags
+    test above guards) — only discoverable by checking the actual
+    server_command, not by checking that the CLI itself accepted the flag."""
+    monkeypatch.setenv("MTPLX_CONFIG", str(tmp_path / "missing-config.toml"))
+    model_dir = tmp_path / "example-model"
+    model_dir.mkdir()
+    payload = _serve_dry_run_payload_for_model(
+        monkeypatch,
+        capsys,
+        model_dir,
+        extra_args=(
+            "--resource-profile",
+            "interactive",
+            "--prefill-duty-cycle",
+            "0.5",
+            "--decode-duty-cycle",
+            "0.35",
+            "--min-decode-tps",
+            "12",
+        ),
+    )
+    command = payload["server_command"]
+    assert "--resource-profile interactive" in command
+    assert "--prefill-duty-cycle 0.5" in command
+    assert "--decode-duty-cycle 0.35" in command
+    assert "--min-decode-tps 12" in command
+
+
+def test_serve_omits_resource_governor_flags_when_not_passed(
+    monkeypatch, tmp_path, capsys
+):
+    """The forwarding must be conditional on explicit values, not always-on
+    — a bare `mtplx serve` must not silently pin every server subprocess to
+    a profile forever (would break `mtplx-qos`/the admin API's live
+    switching by always resetting to the CLI default on every restart)."""
+    monkeypatch.setenv("MTPLX_CONFIG", str(tmp_path / "missing-config.toml"))
+    model_dir = tmp_path / "example-model"
+    model_dir.mkdir()
+    payload = _serve_dry_run_payload_for_model(monkeypatch, capsys, model_dir)
+    command = payload["server_command"]
+    assert "--resource-profile" not in command
+    assert "--prefill-duty-cycle" not in command
+    assert "--decode-duty-cycle" not in command
+    assert "--min-decode-tps" not in command
+
+
+def test_with_batching_args_forwards_resource_governor_flags():
+    """Same bug class as the two tests above, one level up: `mtplx start`
+    and its sub-flows (start pi/opencode/swival/hermes/...) build a fresh
+    serve namespace field-by-field via _with_batching_args before ever
+    reaching cmd_serve_public, so these flags must survive that handoff too
+    or `mtplx start --resource-profile interactive` would drop them even
+    with the server_command fix in place."""
+    from types import SimpleNamespace
+
+    from mtplx.commands.public import _with_batching_args
+
+    source = SimpleNamespace(
+        resource_profile="interactive",
+        prefill_duty_cycle=0.5,
+        decode_duty_cycle=0.35,
+        min_decode_tps=12.0,
+    )
+    target = SimpleNamespace()
+    _with_batching_args(target, source)
+    assert target.resource_profile == "interactive"
+    assert target.prefill_duty_cycle == 0.5
+    assert target.decode_duty_cycle == 0.35
+    assert target.min_decode_tps == 12.0
+
+
+def test_with_batching_args_defaults_resource_governor_flags_to_none():
+    from types import SimpleNamespace
+
+    from mtplx.commands.public import _with_batching_args
+
+    target = SimpleNamespace()
+    _with_batching_args(target, SimpleNamespace())
+    assert target.resource_profile is None
+    assert target.prefill_duty_cycle is None
+    assert target.decode_duty_cycle is None
+    assert target.min_decode_tps is None
+
+
 def test_serve_no_auth_parses_and_forwards(monkeypatch, tmp_path, capsys):
     """`mtplx serve --no-auth` — the exact spelling the 2.5.4 notes promised
     (#235) — must parse at the public CLI and reach the server subprocess.
