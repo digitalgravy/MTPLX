@@ -815,6 +815,24 @@ recorded for completeness per brief section 25's testing discipline.
   already bound... it starts just fine, but the reports [go] nuts until
   manually changed"), which is what prompted re-reading the actual
   subprocess-spawn code instead of re-asserting the first theory.
+- **New, found by the same external user (2026-09-04), in scope, fixed**:
+  `scripts/mtplx-qos-ui.html` — profile buttons updated correctly on
+  click, but the prefill/decode stats panel never updated on its own
+  ("the details in the little panel never update even though the
+  buttons do"). Root cause: `apiFetch()`'s `GET /admin/resource-governor`
+  polling request had no cache-control of any kind (no `cache` fetch
+  option, no cache-busting), and the endpoint itself sets no
+  `Cache-Control` header — so a browser was free to serve a stale cached
+  response for the identical repeated URL, while each profile-switch
+  `POST` always hit the network for other reasons (different method,
+  mutating request) and so always looked live. Fixed by adding
+  `cache: "no-store"` and a `_=<timestamp>` cache-busting query param to
+  every admin request. Live-verified: opened the page, sent a real
+  `/v1/chat/completions` request via `curl` directly against the server
+  (bypassing the UI entirely), and confirmed the on-screen prefill/decode
+  step counts updated to match within one poll cycle with no manual
+  interaction (previously would have required a page reload to show
+  anything but the initial snapshot).
 
 ## Benchmark backlog
 

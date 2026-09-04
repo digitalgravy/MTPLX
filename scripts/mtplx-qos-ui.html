@@ -335,7 +335,15 @@
       headers["x-api-key"] = key;
       headers["Authorization"] = "Bearer " + key;
     }
-    return fetch(baseUrl() + path, Object.assign({}, options, { headers: headers }));
+    // `cache: "no-store"` plus a cache-busting query param on top: the
+    // admin GET has no Cache-Control header of its own, and some browsers
+    // (seen on Safari) will happily serve a stale response for repeated
+    // identical GETs to the same URL without either — which looks exactly
+    // like "the numbers never update" while POSTs (a different URL/method
+    // each time) keep working.
+    var url = baseUrl() + path;
+    url += (url.indexOf("?") === -1 ? "?" : "&") + "_=" + Date.now();
+    return fetch(url, Object.assign({ cache: "no-store" }, options, { headers: headers }));
   }
 
   function showError(message) {
