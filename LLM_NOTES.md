@@ -578,6 +578,18 @@ If you resume Phase 6 later, this function is the natural place a
 memory-pressure check would also live (call it or extend it, don't build
 a parallel admission gate).
 
+## Session 1 continued — mtplx-qos companion tool (same day)
+
+`scripts/mtplx-qos`: stdlib-only, no `mtplx` import, executable directly
+(`./scripts/mtplx-qos max`) or via `python3 scripts/mtplx-qos ...`. Loaded
+in tests by file path (`SourceFileLoader`, no `.py` extension) — see
+`tests/test_mtplx_qos_tool.py` if extending it, same technique. Amusing
+real find: the very first live test of `auto` correctly detected the
+user's actual running Moonlight session on this dev machine and switched
+to `interactive` — not staged, just happened to be true. If a future
+session runs `mtplx-qos auto` and it does something unexpected, check
+`ps aux | grep -i moonlight` before assuming it's a bug.
+
 ### Unresolved questions / exact next action for a fresh session
 
 Phases 0-4, the MTP decode hook, the AR pipeline lane, all reachable

@@ -18,8 +18,8 @@ section 5-6 and the "Completed" entries below for full technical detail.
 
 Writing user-facing documentation (`docs/resource-governor/README.md`,
 `ARCHITECTURE.md`, a plain-language guide, `BENCHMARKS.md` skeleton,
-`UPSTREAM_STATUS.md`) and the `mtplx-qos` companion tool, per explicit
-user request.
+`UPSTREAM_STATUS.md`), per explicit user request. The `mtplx-qos`
+companion tool (Phase 7) is done — see "Completed" below.
 
 ## Next up
 
@@ -503,6 +503,46 @@ user request.
     reason message before any generation starts; switched back to `max`
     and confirmed the same request completes normally (`200`, real
     generated tokens).
+- [x] **Phase 7 — `mtplx-qos` companion tool, done.** `scripts/mtplx-qos`
+  (executable, `#!/usr/bin/env python3`, stdlib-only — no `mtplx` package
+  import, deliberately: mechanism lives in MTPLX, policy lives here per
+  brief section 3/15).
+  - Manual: `mtplx-qos {max,balanced,interactive,protect,pause}` (POSTs
+    to `/admin/resource-governor/profile`), `mtplx-qos status` (GETs
+    `/admin/resource-governor`). `--url`/`$MTPLX_QOS_URL` for a non-default
+    server address; `$MTPLX_QOS_API_KEY`/`$MTPLX_API_KEY` sent as both
+    `x-api-key` and `Authorization: Bearer` if the server requires auth.
+  - Auto: `mtplx-qos auto` (decide once and apply), `--dry-run` (decide
+    and print only), `--watch SECONDS` (loop). Initial policy exactly per
+    brief section 15: Moonlight running → `interactive`, else →
+    `balanced` — a starting hypothesis, not a tuned claim. Process
+    detection via `pgrep -if <pattern>`, wrapped so a missing `pgrep` or
+    any detector exception degrades to "not detected" rather than
+    crashing auto mode.
+  - Detector registry (`INTERACTIVE_TRIGGER_DETECTORS`) is a plain dict
+    of `name -> callable`, checked in order, first match wins — adding a
+    new interactive-trigger app (or later, non-process signals like idle
+    state or screen lock) is a one-line addition, no changes to the
+    decision logic itself, per brief section 15's explicit "keep the
+    process detector modular" instruction.
+  - Tests: 19 in `tests/test_mtplx_qos_tool.py`, loaded by file path
+    (SourceFileLoader) since the script has no `.py` extension and isn't
+    part of the `mtplx` package — decision logic (trigger fires/doesn't,
+    detector-crash resilience, check-order-stops-at-first-match), CLI
+    parsing, and the HTTP client (mocked `urllib.request.urlopen` —
+    correct method/URL/body, both auth headers sent when an API key is
+    set and neither when it isn't, clean `SystemExit` with the server's
+    own error detail on HTTP errors, a helpful "is `mtplx serve`
+    running?" hint on connection failure).
+  - **Validated live against the real server** — and turned up a small
+    surprise: `mtplx-qos auto` correctly reported `"moonlight is
+    running"` and switched to `interactive` on the very first live test,
+    because Moonlight (`Moonlight AV1.app`) genuinely was running on this
+    dev machine at the time. Not a bug — a real end-to-end confirmation
+    of the exact detector the whole project exists to support, found
+    incidentally rather than staged. Separately confirmed the `balanced`
+    branch and detector-crash handling in isolation (mocked detectors,
+    no real Moonlight dependency).
 
 ## Blocked / needs investigation
 

@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""mtplx-qos — external policy controller for MTPLX's resource governor.
+
+See docs/resource-governor/ for the full design. In one sentence: MTPLX
+itself only knows how to hold a QoS profile and pace its own prefill/decode
+work (the *mechanism*); this tool decides *which* profile should be active
+right now and calls MTPLX's runtime-control API to switch it. It knows
+nothing about MTPLX's internals and needs no MTPLX package installed —
+it only speaks HTTP to an already-running `mtplx serve` process.
+
+Manual usage:
+
+    mtplx-qos max
+    mtplx-qos balanced
+    mtplx-qos interactive
+    mtplx-qos protect
+    mtplx-qos pause
+    mtplx-qos status
+
+Automatic usage:
+
+    mtplx-qos auto              # decide once and apply
+    mtplx-qos auto --dry-run    # decide once, print, don't apply
+    mtplx-qos auto --watch 10   # re-decide and re-apply every 10s
+
+Initial auto policy (brief section 15): if a Moonlight process is running,
+use "interactive"; otherwise "balanced". This is a starting hypothesis, not
+a tuned claim — see docs/resource-governor/BENCHMARKS.md. The detector
+registry below is deliberately modular so future policies (idle state,
+screen lock, foreground app, memory/thermal pressure, other games) can be
+added without touching the decision logic itself.
+
+Server URL: defaults to http://127.0.0.1:8000, overridable with --url or
+the MTPLX_QOS_URL environment variable. Auth: if the server requires an
+API key, set MTPLX_QOS_API_KEY (or MTPLX_API_KEY) in the environment.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from typing import Callable
+
+DEFAULT_BASE_URL = os.environ.get("MTPLX_QOS_URL", "http://127.0.0.1:8000")
+KNOWN_PROFILES = ("max", "balanced", "interactive", "protect", "pause")
+
+
+# ---- HTTP client (stdlib only — no MTPLX package dependency) ------------
+
+
+def _api_key() -> str | None:
+    return os.environ.get("MTPLX_QOS_API_KEY") or os.environ.get("MTPLX_API_KEY")
+
+
+def _request(method: str, path: str, base_url: str, body: dict | None = None) -> dict:
+    url = base_url.rstrip("/") + path
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    api_key = _api_key()
+    if api_key:
+        # MTPLX's auth middleware accepts either; sending both is harmless
+        # and saves guessing which one a given server build expects.
+        req.add_header("x-api-key", api_key)
+        req.add_header("Authorization", f"Bearer {api_key}")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise SystemExit(f"error: {exc.code} {exc.reason}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise SystemExit(
+            f"error: could not reach {url}: {exc.reason} "
+            "(is `mtplx serve` running? is --url correct?)"
+        ) from exc
+
+
+def get_status(base_url: str) -> dict:
+    return _request("GET", "/admin/resource-governor", base_url)
+
+
+def set_profile(profile: str, base_url: str) -> dict:
+    return _request(
+        "POST", "/admin/resource-governor/profile", base_url, {"profile": profile}
+    )
+
+
+# ---- process detectors (modular — add more without touching auto logic) -
+
+
+def _process_matches(pattern: str) -> bool:
+    """True if any running process's command line matches pattern
+    (case-insensitive substring via `pgrep -if`). Best-effort: any failure
+    (pgrep missing, permissions, etc.) is treated as "not detected" rather
+    than raised, since a detector glitch should degrade auto mode toward
+    the conservative default, not crash it."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-if", pattern],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def moonlight_running() -> bool:
+    return _process_matches("moonlight")
+
+
+# Each entry: if the detector returns True, "interactive" is the decision.
+# Checked in order; first match wins. Add entries here (idle-state, screen
+# lock, foreground app, memory/thermal pressure, other games/creative apps)
+# to extend auto mode — see brief section 15's "keep the process detector
+# modular" instruction. Each detector should be self-contained and safe to
+# call repeatedly (auto --watch calls all of them on every tick).
+INTERACTIVE_TRIGGER_DETECTORS: dict[str, Callable[[], bool]] = {
+    "moonlight": moonlight_running,
+}
+
+
+def decide_auto_profile() -> tuple[str, str]:
+    """Return (profile, reason) for `mtplx-qos auto`."""
+    for name, detector in INTERACTIVE_TRIGGER_DETECTORS.items():
+        try:
+            if detector():
+                return "interactive", f"{name} is running"
+        except Exception as exc:  # noqa: BLE001 - a detector must never crash auto mode
+            print(f"[mtplx-qos] warning: {name} detector failed: {exc}", file=sys.stderr)
+    return "balanced", "no interactive-trigger process detected"
+
+
+# ---- CLI ------------------------------------------------------------------
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="mtplx-qos",
+        description=(
+            "External policy controller for MTPLX's resource governor. "
+            "MTPLX holds the mechanism (duty-cycle pacing); this tool "
+            "decides which profile should be active and calls MTPLX's "
+            "runtime API to switch it live, with no restart or model "
+            "reload."
+        ),
+    )
+    parser.add_argument(
+        "--url",
+        default=DEFAULT_BASE_URL,
+        help=f"MTPLX server base URL (default: {DEFAULT_BASE_URL}; also $MTPLX_QOS_URL)",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    for profile in KNOWN_PROFILES:
+        sub.add_parser(profile, help=f"Switch the running server to the {profile!r} profile")
+
+    sub.add_parser("status", help="Show the current resource-governor state as JSON")
+
+    auto_p = sub.add_parser(
+        "auto",
+        help="Pick a profile automatically (Moonlight running -> interactive, else balanced)",
+    )
+    auto_p.add_argument(
+        "--watch",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Re-check and re-apply every SECONDS instead of running once",
+    )
+    auto_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the decision without calling the API",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command in KNOWN_PROFILES:
+        result = set_profile(args.command, args.url)
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "status":
+        result = get_status(args.url)
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "auto":
+
+        def _tick() -> None:
+            profile, reason = decide_auto_profile()
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[mtplx-qos {timestamp}] auto: {profile} ({reason})")
+            if not args.dry_run:
+                set_profile(profile, args.url)
+
+        if args.watch is None:
+            _tick()
+            return 0
+        if args.watch <= 0:
+            parser.error("--watch must be a positive number of seconds")
+        try:
+            while True:
+                _tick()
+                time.sleep(args.watch)
+        except KeyboardInterrupt:
+            print()  # tidy prompt after ^C
+            return 0
+
+    parser.error(f"unknown command {args.command!r}")
+    return 1  # pragma: no cover - argparse.error() exits before this
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
