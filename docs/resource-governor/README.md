@@ -115,9 +115,28 @@ model); if you get a 404, you're running vanilla MTPLX, not this fork.
 **`mtplx: error: unrecognized arguments: --resource-profile interactive`**
 — your `mtplx` isn't this fork's build; it's the launcher-shim problem
 above. Run `which mtplx` — if it's anywhere other than the venv you just
-activated, that's why. `deactivate` then `source <path-to-your-venv>/bin/activate`
-again and retry, and make sure you're not opening a new terminal tab
-without reactivating the venv first.
+activated, that's why. This can still happen *even with the venv's
+prompt showing* (`(mtplx-governor) you@mac %`) if you ran `mtplx` (or
+`which mtplx`) in that same terminal tab **before** activating the venv:
+zsh and bash both cache resolved command locations per shell session and
+don't always notice `PATH` changed underneath them. Fix:
+
+```bash
+hash -r        # clear the shell's cached command locations
+which mtplx    # confirm it now points inside your venv
+```
+
+If it's still wrong after that, skip `PATH` resolution entirely and call
+the venv's `mtplx` by its full path — this always works regardless of
+`PATH`/caching:
+
+```bash
+~/mtplx-governor/bin/mtplx serve --model <model> --resource-profile interactive
+```
+
+(or `<your-clone>/.venv/bin/mtplx` if you used the clone-based install).
+When in doubt, opening a brand new terminal tab and activating the venv
+there first also sidesteps the stale-cache problem entirely.
 
 ## What it actually does today
 
