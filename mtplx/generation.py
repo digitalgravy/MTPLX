@@ -2561,6 +2561,7 @@ def _prefill_restored_prompt_suffix(
     gdn_boundary_sink: list[tuple[int, Any, Any]] | None = None,
     vision_splice: Any | None = None,
     stable_prefix_len: int | None = None,
+    resource_governor: ResourceGovernor | None = None,
 ) -> tuple[Any, Any, float, float]:
     """Extend a restored SessionBank prefix without one giant suffix forward.
 
@@ -2749,6 +2750,16 @@ def _prefill_restored_prompt_suffix(
             rt, restored.cache
         )
         _check_splice_consumed()
+        if resource_governor is not None:
+            # Fused single-shot path: work_seconds spans the whole thing
+            # (forward+eval, then append_history's own forced eval above,
+            # then repage) since this is the entire prefill for this
+            # request, not one chunk of many.
+            resource_governor.after_prefill_chunk(
+                work_seconds=time.perf_counter() - started,
+                tokens=suffix_total,
+                abort_check=abort_check,
+            )
         return (
             suffix_logits[:, -1, :],
             suffix_hidden[:, -1:, :] if suffix_hidden is not None else None,
@@ -2839,6 +2850,12 @@ def _prefill_restored_prompt_suffix(
             del hidden_chunk
             del logits_chunk
             target_forward_time += _prefill_chunk_cache_cleanup(rt)
+            if resource_governor is not None:
+                resource_governor.after_prefill_chunk(
+                    work_seconds=time.perf_counter() - started,
+                    tokens=end - start,
+                    abort_check=abort_check,
+                )
             _check_postcommit_abort(abort_check)
 
     started = time.perf_counter()
@@ -3037,6 +3054,7 @@ def _restore_near_prefix_prompt_state(
     stable_prefix_len: int | None = None,
     matched_ceiling: int | None = None,
     vision_splice: Any | None = None,
+    resource_governor: ResourceGovernor | None = None,
 ) -> PromptState | None:
     """matched_ceiling: hard cap on any candidate's matched length.
 
@@ -3414,6 +3432,7 @@ def _restore_near_prefix_prompt_state(
                 gdn_boundary_sink=suffix_boundary_sink,
                 stable_prefix_len=stable_prefix_len,
                 vision_splice=vision_splice,
+                resource_governor=resource_governor,
             )
         )
         entry.hits += 1
@@ -4103,6 +4122,7 @@ def restore_or_prefill_prompt_state(
                 # omitting it here left the hottest tool-round path
                 # block-rounding down ~one 256-token block per round.
                 stable_prefix_len=stable_prefix_len,
+                resource_governor=resource_governor,
             )
             if near_prompt_state is not None:
                 return _emit_prefill_complete(near_prompt_state)
@@ -4230,6 +4250,7 @@ def restore_or_prefill_prompt_state(
                     gdn_boundary_sink=suffix_boundary_sink,
                     vision_splice=vision_splice,
                     stable_prefix_len=stable_prefix_len,
+                    resource_governor=resource_governor,
                 )
             )
             return _emit_prefill_complete(PromptState(
@@ -4279,6 +4300,7 @@ def restore_or_prefill_prompt_state(
                 vision_restore_spans[0][0] if vision_restore_spans else None
             ),
             vision_splice=vision_splice,
+            resource_governor=resource_governor,
         )
         if near_prompt_state is not None:
             return _emit_prefill_complete(near_prompt_state)
@@ -4324,6 +4346,7 @@ def restore_or_prefill_prompt_state(
                 vision_splice=vision_splice,
                 stable_prefix_len=stable_prefix_len,
                 gdn_boundary_sink=gdn_boundary_sink,
+                resource_governor=resource_governor,
             )
             prompt_eval_time = target_time + prompt_history_time
         else:
@@ -4335,6 +4358,8 @@ def restore_or_prefill_prompt_state(
                     prompt_ids,
                     hidden_variant=base_hidden_variant,
                     vision_splice=vision_splice,
+                    abort_check=abort_check,
+                    resource_governor=resource_governor,
                 )
             )
             _check_postcommit_abort(abort_check)
@@ -5442,6 +5467,7 @@ def _prefill_committed_mtp_history_streaming(
     gdn_boundary_sink: list[tuple[int, Any]] | None = None,
     stable_prefix_len: int | None = None,
     prefill_chunk_size: int | None = None,
+    resource_governor: ResourceGovernor | None = None,
 ):
     if not prompt_ids:
         raise ValueError("prompt_ids must not be empty")
@@ -5640,6 +5666,18 @@ def _prefill_committed_mtp_history_streaming(
                 gdn_boundary_sink, cursor, cache, hidden_last=boundary_hidden
             )
         del boundary_hidden
+        if resource_governor is not None:
+            # Whole-chunk wall time, not just the forward+eval slice `started`
+            # feeds into target_forward_time: _append_mtp_history above forces
+            # its own eval (force_eval=True) building the MTP draft-head
+            # history cache, which is real per-chunk GPU-adjacent work, same
+            # reasoning as including emit_new_tokens()'s housekeeping in the
+            # MTP decode hook's work measurement.
+            resource_governor.after_prefill_chunk(
+                work_seconds=time.perf_counter() - started,
+                tokens=chunk_len,
+                abort_check=abort_check,
+            )
         _check_postcommit_abort(abort_check)
 
     started = time.perf_counter()
@@ -5674,6 +5712,8 @@ def _prefill_with_hidden_sequence(
     *,
     hidden_variant: str,
     vision_splice: Any | None = None,
+    abort_check: Callable[[], bool] | None = None,
+    resource_governor: ResourceGovernor | None = None,
 ):
     if not prompt_ids:
         raise ValueError("prompt_ids must not be empty")
@@ -5716,9 +5756,16 @@ def _prefill_with_hidden_sequence(
             else:
                 _eval(chunk_logits, chunk_hidden)
             _runtime_count(rt, "prefill_chunks")
-            target_forward_time += time.perf_counter() - started
+            chunk_elapsed = time.perf_counter() - started
+            target_forward_time += chunk_elapsed
             target_forward_time += _prefill_chunk_cache_cleanup(rt)
             hidden_parts.append(chunk_hidden)
+            if resource_governor is not None:
+                resource_governor.after_prefill_chunk(
+                    work_seconds=chunk_elapsed,
+                    tokens=end - start,
+                    abort_check=abort_check,
+                )
     if vision_splice is not None and vision_splice.remaining() > 0:
         # Same contract as _prefill: the final prompt token is forwarded
         # without embeddings, so it may never be an image pad slot.
@@ -6290,6 +6337,18 @@ def generate_ar(
                     emit_token(v)
                     events.append({"step": step, "token": v})
                     _lane_committed += 1
+                    if resource_governor is not None:
+                        # tok_lazy.item() above (wait_elapsed) is this
+                        # iteration's real sync point — one token per
+                        # iteration here, unlike generate_mtpk's cycles, so
+                        # this is a direct per-token hook like the classic
+                        # AR lane's, not the previous-iteration design that
+                        # loop needed.
+                        resource_governor.after_decode_step(
+                            work_seconds=build_elapsed + wait_elapsed,
+                            produced_tokens=1,
+                            abort_check=abort_check,
+                        )
                     armed = False
                     if _loop_guard is not None:
                         _lg = _loop_guard.observe(tokens)

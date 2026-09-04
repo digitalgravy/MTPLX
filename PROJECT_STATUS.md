@@ -2,44 +2,46 @@
 
 ## Current objective
 
-**MTP decode path (`generate_mtpk`) is now hooked and validated — the
-critical gap is closed.** Phases 0-4 (core governor, AR decode pacing,
-prefill pacing, runtime admin API, CLI/config integration) plus the MTP
-hook are all done. Real-model validation confirmed both the original gap
-(governor did nothing on a model's default `generation_mode: "mtp"`) and
-the fix (governor now paces MTP decode correctly: a 150-token request at
-`interactive` took 3.11s vs. 1.03s at `max`, `effective_duty_cycle: 0.4`
-exactly, on the real downloaded `Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed`
-model via a live `mtplx serve` process). See
-`docs/resource-governor/IMPLEMENTATION_NOTES.md` section 5 for the full
-technical account, including a real correctness bug caught and fixed
-during design (see "Completed" below) before it ever reached a commit.
+**Decode and prefill coverage is now complete for every reachable live
+path.** Phases 0-4 (core governor, AR decode pacing, prefill pacing,
+runtime admin API, CLI/config integration), the MTP decode hook, the
+`MTPLX_AR_PIPELINE` lane hook, and all remaining prefill functions are
+done. Confirmed via real-model, live-server testing that a genuinely
+default-configured MTP request (no per-request overrides at all) is now
+paced end-to-end on both prefill and decode — the last gap (prefill
+silently not firing under the real default `mtp_history_policy="committed"`
++ sustained-profile combination, discovered while validating this batch
+of work) is closed. See `docs/resource-governor/IMPLEMENTATION_NOTES.md`
+section 5-6 and the "Completed" entries below for full technical detail.
 
 ## In progress
 
-(nothing in progress at time of writing — MTP hook complete, about to commit)
+Writing user-facing documentation (`docs/resource-governor/README.md`,
+`ARCHITECTURE.md`, a plain-language guide, `BENCHMARKS.md` skeleton,
+`UPSTREAM_STATUS.md`) and the `mtplx-qos` companion tool, per explicit
+user request.
 
 ## Next up
 
-- [ ] Hook `after_decode_step` into the `MTPLX_AR_PIPELINE` lane and
-      batched decode (`batched_decode.py`) too — full decode coverage.
-- [ ] Hook `after_prefill_chunk` into MTPLX's other three chunked-prefill
-      implementations — `_prefill_restored_prompt_suffix`
-      (`generation.py:2548`, warm-restore suffix), `_prefill_with_hidden_sequence`
-      (`generation.py:5656`, MTP-hidden-sequence path, one caller),
-      `_prefill_committed_mtp_history_streaming` (`generation.py:5414`,
-      committed/last_window MTP history policy) — Phase 2 only covers
-      plain `_prefill()`.
+- [ ] Phase 5/6: wire `admission_allowed()` (implemented since Phase 1,
+      unused so far) into an actual request-admission check — recon found
+      there's no live admission enforcement to hook into today, so this
+      is new wiring, not a hook into something existing.
 - [ ] Runtime-verify (not just statically infer) that mutating
       `state.args.max_active_requests`/`decode_batch_max` live actually
       changes admission behavior on a running server — these two keys are
       *not* currently in `DASHBOARD_MUTABLE_SETTINGS_KEYS`
       (`openai.py:15137-15155`), unlike `prefill_chunk_tokens`.
-- [ ] Phase 5/6: wire `admission_allowed()` (implemented since Phase 1,
-      unused so far) into an actual request-admission check — recon found
-      there's no live admission enforcement to hook into today, so this
-      is new wiring, not a hook into something existing.
-- [ ] Phase 7: `mtplx-qos` companion CLI tool.
+- [ ] Batched decode (`batched_decode.py`): the general
+      `generate_greedy_batched()` entry point is confirmed **not** on the
+      live serving path (no callers outside its own file and tests — same
+      dead-scaffolding category as `MTPContinuousScheduler`). There is a
+      live, narrower A3B/whole-MoE-specific batched lane
+      (`install_a3b_mtp_batch_lane` in `a3b_mtp_batch.py`, imported by
+      `server/openai.py`) reusing low-level primitives from
+      `batched_decode.py` — deferred as an explicit follow-up given it's
+      both model-family-narrow and comparably complex to the MTP hook
+      (cycle-based, needs the same independent-verification discipline).
 - [ ] Phase 8: M5 Ultra hardware tuning + real Moonlight acceptance test
       — needs the actual target machine, not this M4 Max dev machine.
 
@@ -401,6 +403,71 @@ during design (see "Completed" below) before it ever reached a commit.
   - Not yet done: `MTPLX_AR_PIPELINE` lane, batched decode
     (`batched_decode.py`), and the remaining three prefill functions are
     still unhooked (see "Next up").
+- [x] **Full decode-lane and prefill-function coverage — done.**
+  - **`MTPLX_AR_PIPELINE` lane** (`generate_ar`'s pipelined decode
+    while-loop, `generation.py`): much simpler than the MTP hook — this
+    loop commits exactly one token per iteration with a single clear
+    sync point (`tok_lazy.item()`), confirmed by reading the loop before
+    hooking (not assumed from the MTP lesson — verified this one
+    genuinely doesn't share MTP's multi-call-per-cycle hazard). Direct
+    per-token hook, same shape as the classic AR lane's. No new parameter
+    threading needed — this lane lives inside `generate_ar`, which
+    already has `resource_governor`/`abort_check` in scope from Phase 1.
+  - **All three remaining prefill functions hooked**:
+    `_prefill_restored_prompt_suffix` (warm SessionBank restore — both
+    its fused single-shot path and its chunked path),
+    `_prefill_committed_mtp_history_streaming` (the real default MTP
+    prefill path, see below), and `_prefill_with_hidden_sequence`
+    (needed a new `abort_check` parameter added — it didn't accept one
+    before, so the governor yield there is now interruptible where it
+    previously couldn't have been checked at all). Threaded
+    `resource_governor` through the intermediate wrapper functions
+    (`_restore_near_prefix_prompt_state`, both its call sites inside
+    `restore_or_prefill_prompt_state`) needed to reach them from
+    `generate_ar`/`generate_mtpk`.
+  - **Second real gap found and closed, same session**: while wiring
+    `_prefill_committed_mtp_history_streaming`, tracing the branch logic
+    in `restore_or_prefill_prompt_state` showed that `generate_mtpk`'s
+    own call passes `mtp_history_policy="committed"`, and — combined with
+    `MTPLX_SUSTAINED_PREFILL` being on under the shipped default
+    "sustained" profile — this means **real default MTP requests route
+    prefill through `_prefill_committed_mtp_history_streaming`, not the
+    plain `_prefill()` hooked back in Phase 2.** This exactly explains
+    why the MTP-hook milestone's live-server test showed `"prefill":
+    {"steps": 0}` even with decode pacing working correctly. Confirmed
+    fixed with a fresh live-server test after this batch:
+    `GET /admin/resource-governor` now shows `"prefill": {"steps": 1,
+    "yields": 1, ...}` for a genuinely default-configured request (no
+    `generation_mode` override at all).
+  - Followed the same "verify before hooking" discipline the MTP lesson
+    established: read each function's actual chunk-loop/call-site
+    structure before assuming a hook point was safe, rather than
+    pattern-matching from Phase 2's `_prefill()` shape. Also checked
+    whether `batched_decode.py`'s `generate_greedy_batched()` was worth
+    hooking the same way — confirmed via grep it has no callers outside
+    its own file and tests, i.e. it's dead on the live path (same
+    category as `MTPContinuousScheduler` from Phase 0 recon); deferred
+    rather than hooking dead code. Found the real live batched path is
+    narrower (A3B/whole-MoE-specific, `a3b_mtp_batch.py`) and deferred
+    that too given its similar cycle-based complexity to the MTP hook.
+  - Tests: 3 new files —
+    `tests/test_resource_governor_ar_pipeline_integration.py` (7 tests,
+    real MLX compute via a model that genuinely engages the pipeline
+    lane, unlike the existing `test_async_decode.py` test which
+    deliberately refuses engagement to test gating alone — includes an
+    explicit `test_pipeline_lane_actually_engages_in_this_fixture` sanity
+    check so a future upstream gating change can't silently make the
+    other tests exercise the wrong code path),
+    `tests/test_resource_governor_prefill_alt_paths_integration.py` (9
+    tests reusing `tests/test_generation_sustained.py`'s own proven
+    fixtures/mocks for these exact functions rather than building new
+    ones from scratch). All confirm governor-off/max-profile are no-ops,
+    throttled output matches unthrottled, wall-clock actually slows, and
+    step/yield counts match expected chunk counts.
+  - Ran the new tests plus `test_generation_sustained.py`,
+    `test_a3b_whole_moe.py`, `test_laguna_model.py`, the full governor
+    test suite, and `test_server_openai.py` — only the same pre-existing
+    `test_laguna_model.py` RAM-preflight failure appeared.
 
 ## Blocked / needs investigation
 

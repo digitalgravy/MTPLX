@@ -598,5 +598,62 @@ exactly, `natural_tps_ema` ≈139.3, `delivered_tps_ema` ≈55.7 — 139.3 ×
 restart, on the model's own default MTP decode path.
 
 These are the concrete next steps before further governor phases
-(MTPLX_AR_PIPELINE lane, batched decode, remaining prefill functions,
-memory-safety admission) begin.
+(memory-safety admission) begin.
+
+---
+
+## 6. Full decode/prefill coverage note (implementation session)
+
+Follow-up work hooked the remaining reachable decode/prefill paths:
+`MTPLX_AR_PIPELINE` (the pipelined AR decode lane inside `generate_ar`)
+and all three prefill functions the MTP hook's session left unhooked
+(`_prefill_restored_prompt_suffix`, `_prefill_committed_mtp_history_streaming`,
+`_prefill_with_hidden_sequence`).
+
+**`MTPLX_AR_PIPELINE` lane**: verified independently (not assumed from
+the MTP lesson, but not skipped either) that this lane does *not* share
+`generate_mtpk`'s multi-call-per-cycle hazard — its `while True:` loop
+commits exactly one token per iteration via a single `tok_lazy.item()`
+sync, so a direct per-token hook (same shape as the classic AR lane) is
+safe. No new parameter threading needed: this lane executes inside
+`generate_ar`'s own body, which already had `resource_governor`/
+`abort_check` in scope since Phase 1.
+
+**Second real gap found (same session)**: hooking
+`_prefill_committed_mtp_history_streaming` required re-tracing
+`restore_or_prefill_prompt_state`'s branch logic, which revealed that
+`generate_mtpk`'s call passes `mtp_history_policy="committed"` — and
+combined with `MTPLX_SUSTAINED_PREFILL` being on under the shipped
+default "sustained" profile (per section 1 above), **real default MTP
+requests route prefill through `_prefill_committed_mtp_history_streaming`,
+never through the plain `_prefill()` hooked in Phase 2.** This is exactly
+why the MTP-hook milestone's live-server test (section 5 above) showed
+`"prefill": {"steps": 0}` even though decode pacing was working
+correctly — prefill for that request never touched the hooked function
+at all. Confirmed fixed with a fresh live-server test: a genuinely
+default-configured request (no `generation_mode` override) now shows
+`"prefill": {"steps": 1, "yields": 1, ...}`.
+
+**`_prefill_with_hidden_sequence`** didn't accept `abort_check` before
+this pass — added it (and threaded it from its one caller) so the new
+governor yield there is cancellation-aware, rather than leaving it
+uninterruptible while adding pacing to it.
+
+**`batched_decode.py` investigated, not hooked**: `generate_greedy_batched()`
+(the module's main entry point, and what section 1's original citation
+pointed at) has no callers outside its own file and its own tests —
+confirmed dead on the live serving path via grep, the same category as
+`MTPContinuousScheduler` from Phase 0. There *is* a live batched decode
+path, but it's narrower and different: `install_a3b_mtp_batch_lane`
+(`mtplx/a3b_mtp_batch.py`, imported by `server/openai.py`) implements a
+specialized lane for A3B/whole-MoE models using low-level primitives
+borrowed from `batched_decode.py`, not `generate_greedy_batched` itself.
+Deferred rather than hooked: model-family-narrow, and the primitives it
+uses (`MTPK1RowCycle`, cycle-based) look comparably complex to
+`generate_mtpk` — warrants the same independent-verification care before
+touching it, not a quick addition.
+
+With this pass, every decode/prefill path reachable from a real
+`mtplx serve` request for AR and MTP generation modes is covered. Only
+the narrow A3B batched lane and Phase 5/6 (admission enforcement, which
+has no live enforcement point to hook into at all yet) remain.

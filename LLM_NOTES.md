@@ -527,46 +527,70 @@ own default MTP path. A 150-token request: 1.03s at `max`, 3.11s at
 no restart). This is the scenario that was completely inert before this
 hook — now it works.
 
+## Session 1 continued — full decode/prefill coverage (same day, requested by user: "round it out")
+
+Hooked everything left reachable from a live request: the
+`MTPLX_AR_PIPELINE` decode lane, and all three remaining prefill
+functions. Full detail in `docs/resource-governor/IMPLEMENTATION_NOTES.md`
+section 6 and PROJECT_STATUS.md; two things worth not rediscovering:
+
+- **`MTPLX_AR_PIPELINE` lane was simple, MTP's lesson still applied as a
+  check, not a blanket rule**: independently verified this loop commits
+  exactly one token per iteration with one clear sync point — genuinely
+  safe for a direct per-token hook, no previous-iteration trick needed.
+  The lesson from the MTP hook wasn't "always use the complicated
+  design," it was "verify the specific safety claim before hooking,
+  every time" — this time verification confirmed the simple approach
+  *was* safe.
+- **A second real gap, same pattern as the first**: wiring
+  `_prefill_committed_mtp_history_streaming` required re-reading
+  `restore_or_prefill_prompt_state`'s branches, which showed real default
+  MTP requests (`mtp_history_policy="committed"` + sustained profile)
+  never actually reach the plain `_prefill()` hooked in Phase 2 — they
+  go through this other function instead. This is exactly why the MTP
+  hook's own live-server test showed zero prefill steps despite decode
+  pacing working. Fixed and confirmed with a fresh live-server check.
+  **Lesson reinforced**: a live-server test with real stats output is
+  what actually caught this both times — unit tests against toy models
+  proved the mechanism correct but couldn't have surfaced "which function
+  does a real default request actually call," since that's a question
+  about the surrounding branch logic, not the hook itself. Keep doing
+  real end-to-end checks after each milestone, not just unit tests.
+- `batched_decode.py`'s main entry point (`generate_greedy_batched`) is
+  confirmed dead on the live path (no callers outside its own file/tests)
+  — don't hook it. The real live batched path is
+  `a3b_mtp_batch.py`'s `install_a3b_mtp_batch_lane`, narrow (A3B/whole-MoE
+  models only) and cycle-based like `generate_mtpk` — deferred, needs the
+  same careful independent verification before touching, not a quick
+  addition.
+
 ### Unresolved questions / exact next action for a fresh session
 
-Phases 0-4 plus the MTP decode hook are done, tested, and pushed. The
-governor now paces both AR and MTP decode (the two most common decode
-paths) and prefill (plain `_prefill()`, used by both). If you're picking
-this up cold:
+Phases 0-4, the MTP decode hook, the AR pipeline lane, and all reachable
+prefill functions are done, tested, and pushed. Decode/prefill coverage
+is complete for every path a real `mtplx serve` request can take in AR or
+MTP mode. If you're picking this up cold:
 
-1. Read `docs/resource-governor/IMPLEMENTATION_NOTES.md` in full
-   (including its Phase 2 and MTP-hook correction/resolution notes) and
-   this file's Phase 1-4 + MTP-hook sections above before writing more
-   governor code — all design decisions so far, including two corrected
-   mistakes (the `_prefill` vs `_prefill_with_hidden_sequence` hook
-   choice, and the `emit_new_tokens()` vs top-of-loop MTP design), are
-   already settled. Don't re-derive or second-guess them without new
-   evidence.
-2. Remaining decode/prefill coverage, in rough priority order (brief
-   section 26 discipline: small, separately-tested, separately-committed
-   changes, not one big patch):
-   - `MTPLX_AR_PIPELINE` lane (`generation.py`, the `_lane_step`/
-     `while True:` block in `generate_ar` — re-find the exact current
-     line). Same kind of care as the MTP hook is warranted: verify
-     independently whether this lane's loop has any similar
-     multi-call-per-cycle helper before assuming a naive hook is safe.
-   - Batched decode (`batched_decode.py`) — a different file, not yet
-     investigated at all for hook placement.
-   - The three still-unhooked prefill functions: `_prefill_restored_prompt_suffix`
-     (`:2548`, warm-restore suffix), `_prefill_committed_mtp_history_streaming`
-     (`:5414`, committed/last_window MTP history policy),
-     `_prefill_with_hidden_sequence` (`:5656`, narrow one-caller path).
-3. Phase 5/6: wire `admission_allowed()` (implemented since Phase 1,
-   still unused) into an actual request-admission check — recon found
-   there's no live admission enforcement to hook into today, so this is
-   new wiring, not a hook into something existing.
-4. Phase 7: `mtplx-qos` companion CLI tool (separate from MTPLX core,
-   per the brief's mechanism-vs-policy split).
-5. Phase 8: M5 Ultra hardware tuning + real Moonlight acceptance test —
-   needs the actual target machine, not this M4 Max dev machine.
-6. Keep committing docs (`PROJECT_STATUS.md`/`LLM_NOTES.md`) as you go,
-   not just at the end of a session — brief section 28 is explicit about
-   this ("Do not wait until the end of a session").
-7. **Check `git status` for a stray file named `1` before every commit**
-   if you've run tests since the last one (see the recurring
-   `MTPLX_EVAL_AUDIT` gotcha above) — this has now bitten multiple times.
+1. Read `docs/resource-governor/IMPLEMENTATION_NOTES.md` in full and this
+   file's session notes above before writing more governor code — all
+   hook-placement decisions, including three corrected mistakes/gaps
+   found along the way (see IMPLEMENTATION_NOTES.md sections 5-6), are
+   settled. Don't re-derive them.
+2. Check whether documentation work is done: `docs/resource-governor/README.md`,
+   `ARCHITECTURE.md`, a plain-language non-technical guide, `BENCHMARKS.md`,
+   `UPSTREAM_STATUS.md`, and the `mtplx-qos` companion tool were requested
+   by the user in this session — check PROJECT_STATUS.md's "In progress"
+   to see how far that got before this session ended.
+3. Remaining scope, roughly in priority order:
+   - Phase 5/6: wire `admission_allowed()` (implemented since Phase 1,
+     still unused) into an actual request-admission check — no live
+     enforcement point exists to hook into yet, this is new wiring.
+   - A3B batched lane (`a3b_mtp_batch.py`) — deferred, narrow, needs the
+     same careful verification as the MTP hook.
+   - Phase 8: M5 Ultra hardware tuning + real Moonlight acceptance test —
+     needs the actual target machine, not this M4 Max dev machine.
+4. Keep committing docs as you go, not just at the end of a session
+   (brief section 28).
+5. **Check `git status` for a stray file named `1` before every commit**
+   if you've run tests since the last one — this has now bitten multiple
+   times (the `MTPLX_EVAL_AUDIT` gotcha, see above).
