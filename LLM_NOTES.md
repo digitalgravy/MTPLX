@@ -477,64 +477,96 @@ completed entry; the short version:
   and "the governor does anything useful on the actual target machine."
   Promoted to top priority in PROJECT_STATUS.md.
 
+## Session 1 continued — MTP decode hook (same day, 2026-09-04)
+
+Closed the critical gap. Full technical detail in
+`docs/resource-governor/IMPLEMENTATION_NOTES.md` section 5 and
+PROJECT_STATUS.md's MTP-hook "Completed" entry — read those before
+touching `generate_mtpk` again. The one thing worth re-emphasizing here:
+
+**A fork's confident-sounding recommendation was wrong in a way that
+would have shipped a real bug if taken at face value.** The fork (used
+to trace `generate_mtpk`'s ~5,300-line loop rather than loading it all
+into this session's own context) recommended hooking pacing inside
+`emit_new_tokens()`, a helper called from ~10 branch sites that looked
+like a single per-cycle convergence point. I independently re-read the
+actual call sites before writing code (per the "trust but verify"
+discipline for subagent work) and found several fire **mid-cycle** — one
+literally right after the primary token is sampled, before that cycle's
+draft-forward/target-verify work has even happened, with a comment at
+that exact site confirming it. Hooking there as recommended would have
+double-counted tokens per cycle and — worse — folded a prior governor
+sleep's duration into the *next* call's "work" measurement, since a
+second call within one cycle would measure elapsed time inclusive of the
+first call's sleep. A slow, incorrectly-escalating pacing bug, in
+correctness-sensitive speculative-decoding code, that unit tests
+wouldn't obviously catch unless someone specifically thought to check
+`yields <= steps`.
+
+**Lesson for next time**: forks are excellent at surveying large
+unfamiliar code and proposing a hook point, but a proposed hook point in
+control-flow-heavy code needs independent verification of the *specific
+claim that makes it look safe* (here: "called once per cycle") before
+committing to it, not just a general sanity read. This cost maybe 15
+extra minutes of reading two call sites closely before writing the real
+implementation — cheap insurance against a real bug.
+
+**The actual (corrected) design**: pace at the top of the `while` loop
+against the *previous* iteration's measured wall time and token count,
+before that iteration's work begins — not inside `emit_new_tokens()` at
+all. Single unambiguous point per iteration, immune to however many
+internal helper calls happened inside the previous iteration.
+Regression-tested specifically (`test_yields_never_exceed_one_per_cycle_transition`
+in `tests/test_resource_governor_mtp_integration.py`) so this can't
+silently regress back to the buggy design.
+
+**Real-model proof the fix matters**: same live-server test as before,
+but this time *without* forcing `generation_mode: "ar"` — the model's
+own default MTP path. A 150-token request: 1.03s at `max`, 3.11s at
+`interactive` (`effective_duty_cycle: 0.4` exactly, live profile switch,
+no restart). This is the scenario that was completely inert before this
+hook — now it works.
+
 ### Unresolved questions / exact next action for a fresh session
 
-Phases 0-4 done and committed/pushed (core governor, decode pacing on
-the AR lane, prefill pacing on plain `_prefill`, runtime admin API,
-CLI/config integration). Real-model validation done for the AR path.
-**The MTP decode path (`generate_mtpk`) is not hooked — this is the
-current top priority**, not a nice-to-have. If you're picking this up
-cold:
+Phases 0-4 plus the MTP decode hook are done, tested, and pushed. The
+governor now paces both AR and MTP decode (the two most common decode
+paths) and prefill (plain `_prefill()`, used by both). If you're picking
+this up cold:
 
-1. Read `docs/resource-governor/IMPLEMENTATION_NOTES.md` (including its
-   Phase 2 correction note), this file's Phase 1-4 sections above, and
-   PROJECT_STATUS.md's "Real-model validation" entry before writing more
-   governor code — all prior design decisions are settled; the MTP gap
-   is the one open, urgent item.
-2. Go hook `generate_mtpk` (`generation.py:7312`, ~5,300 lines). This is
-   a bigger, more careful task than any hook so far:
-   - Read IMPLEMENTATION_NOTES.md section 2, Q6 and Q7 first — they're
-     explicitly flagged as unresolved from Phase 0 recon: what exactly
-     is "one decode step" in MTP (a draft+verify+commit cycle, producing
-     1..depth tokens, not exactly 1), and whether governed "work time"
-     should include draft-forward time or only target-verify time. Don't
-     guess; read a complete cycle in the actual current code first
-     (`MTPLX_EVAL_AUDIT` — see the gotcha note above — is a good empirical
-     tool for finding the real sync boundaries if static reading isn't
-     conclusive).
-   - Given the function's size, consider fork-ing out the "trace one
-     complete verify cycle and identify the exact hook point" research
-     step rather than reading all 5,300 lines directly into your own
-     context — but write the actual hook code yourself once the boundary
-     is clear, same as every other hook so far.
-   - Mirror the existing pattern exactly: new optional
-     `resource_governor` parameter (default `None`), call
-     `after_decode_step(work_seconds=..., produced_tokens=<tokens this
-     cycle accepted, not always 1>, abort_check=abort_check)` right after
-     whatever the real sync point turns out to be, thread it from
-     `_run_generation`'s `generate_mtpk(...)` call
-     (`server/openai.py`, the `else` branch next to the `generate_ar`
-     branch that already gets it).
-   - **Validate against the real downloaded model again** (it's still on
-     disk: `Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed`), the same way
-     this session did for AR: `mtplx serve`, switch profiles live via the
-     admin API, send a request with the model's *default* generation
-     mode (don't force `generation_mode: "ar"` this time — that's the
-     whole point), confirm `GET /admin/resource-governor`'s `decode`
-     lane shows nonzero steps/yields and a sane `effective_duty_cycle`.
-   - Also confirm deterministic output is unaffected (brief section 18)
-     — same token stream at duty=1.0 governed vs. ungoverned, same as
-     every prior hook's tests did.
-3. After MTP decode is hooked, remaining work in rough priority order:
-   `MTPLX_AR_PIPELINE` lane, batched decode, the other three prefill
-   functions (restored-suffix `:2548`, committed-history-streaming
-   `:5414`, hidden-sequence `:5656`), then Phase 5/6 (admission
-   enforcement — recon found there's genuinely nothing live to hook into,
-   this is new wiring) and Phase 7 (`mtplx-qos` companion). Phase 8 (M5
-   Ultra tuning + Moonlight test) needs the actual target hardware.
-4. Keep committing docs (`PROJECT_STATUS.md`/`LLM_NOTES.md`) as you go,
+1. Read `docs/resource-governor/IMPLEMENTATION_NOTES.md` in full
+   (including its Phase 2 and MTP-hook correction/resolution notes) and
+   this file's Phase 1-4 + MTP-hook sections above before writing more
+   governor code — all design decisions so far, including two corrected
+   mistakes (the `_prefill` vs `_prefill_with_hidden_sequence` hook
+   choice, and the `emit_new_tokens()` vs top-of-loop MTP design), are
+   already settled. Don't re-derive or second-guess them without new
+   evidence.
+2. Remaining decode/prefill coverage, in rough priority order (brief
+   section 26 discipline: small, separately-tested, separately-committed
+   changes, not one big patch):
+   - `MTPLX_AR_PIPELINE` lane (`generation.py`, the `_lane_step`/
+     `while True:` block in `generate_ar` — re-find the exact current
+     line). Same kind of care as the MTP hook is warranted: verify
+     independently whether this lane's loop has any similar
+     multi-call-per-cycle helper before assuming a naive hook is safe.
+   - Batched decode (`batched_decode.py`) — a different file, not yet
+     investigated at all for hook placement.
+   - The three still-unhooked prefill functions: `_prefill_restored_prompt_suffix`
+     (`:2548`, warm-restore suffix), `_prefill_committed_mtp_history_streaming`
+     (`:5414`, committed/last_window MTP history policy),
+     `_prefill_with_hidden_sequence` (`:5656`, narrow one-caller path).
+3. Phase 5/6: wire `admission_allowed()` (implemented since Phase 1,
+   still unused) into an actual request-admission check — recon found
+   there's no live admission enforcement to hook into today, so this is
+   new wiring, not a hook into something existing.
+4. Phase 7: `mtplx-qos` companion CLI tool (separate from MTPLX core,
+   per the brief's mechanism-vs-policy split).
+5. Phase 8: M5 Ultra hardware tuning + real Moonlight acceptance test —
+   needs the actual target machine, not this M4 Max dev machine.
+6. Keep committing docs (`PROJECT_STATUS.md`/`LLM_NOTES.md`) as you go,
    not just at the end of a session — brief section 28 is explicit about
    this ("Do not wait until the end of a session").
-5. **Check `git status` for a stray file named `1` before every commit**
+7. **Check `git status` for a stray file named `1` before every commit**
    if you've run tests since the last one (see the recurring
-   `MTPLX_EVAL_AUDIT` gotcha above) — this has now bitten twice.
+   `MTPLX_EVAL_AUDIT` gotcha above) — this has now bitten multiple times.

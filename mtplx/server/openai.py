@@ -22655,6 +22655,7 @@ def _run_generation(
                         online_hidden_corrector_key=str(
                             state.args.online_hidden_corrector_key
                         ),
+                        resource_governor=state.resource_governor,
                     )
         except PostcommitAbort:
             # abort_check tripped inside the prefill. Two arms share it: a

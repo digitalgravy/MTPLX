@@ -7393,6 +7393,7 @@ def generate_mtpk(
     vision_splice: Any | None = None,
     constraint: Any | None = None,
     adaptive_width_policy: Any | None = None,
+    resource_governor: ResourceGovernor | None = None,
 ) -> GenerationOutput:
     """Generate with a fixed native-MTP depth.
 
@@ -7850,6 +7851,7 @@ def generate_mtpk(
         # 10+ minutes, 2026-07-03).
         abort_check=abort_check,
         stable_prefix_len=_stable_prefix_len,
+        resource_governor=resource_governor,
     )
     prompt_state_total_time_s = time.perf_counter() - _prompt_state_started
     pre_first_token_setup_started = time.perf_counter()
@@ -9123,7 +9125,35 @@ def generate_mtpk(
     # and compiled indexer pass their deferred model/MTP gates.  The disabled
     # branch below preserves v2.10's original rollback/reappend behavior.
     qsa_mtp_precompute_active = qsa_mtp_precompute_enabled()
+    # Resource-governor cycle timing (see docs/resource-governor/
+    # IMPLEMENTATION_NOTES.md's MTP hook note). This loop body has ~10
+    # internal emit_new_tokens() call sites across its verify_strategy/
+    # draft_core branches, and — verified by reading the code, not assumed —
+    # several of them fire MID-cycle (e.g. immediately after the primary
+    # token is sampled, before draft/verify/accept work even happens), not
+    # just once at cycle end. Hooking pacing there risked double-counting
+    # tokens and, worse, folding a prior yield's sleep time into the next
+    # measurement as if it were real work. Measuring "top of this loop
+    # iteration" to "top of the next" instead sidesteps that entirely: it's
+    # an unambiguous single point per iteration, and it naturally captures
+    # the FULL previous cycle's real work (draft + verify + commit +
+    # housekeeping, however many emit_new_tokens() calls that involved) with
+    # no risk of counting a governor sleep as work, since the timer resets
+    # only after the sleep already happened. The tradeoff: the very last
+    # cycle's work is never paced against (there's no "next iteration top"
+    # to trigger it) — negligible, since generation is ending anyway.
+    _governor_prev_cycle_started_s: float | None = None
+    _governor_prev_cycle_tokens = len(tokens)
     while len(tokens) < max_tokens:
+        if resource_governor is not None:
+            if _governor_prev_cycle_started_s is not None:
+                resource_governor.after_decode_step(
+                    work_seconds=time.perf_counter() - _governor_prev_cycle_started_s,
+                    produced_tokens=max(0, len(tokens) - _governor_prev_cycle_tokens),
+                    abort_check=abort_check,
+                )
+            _governor_prev_cycle_started_s = time.perf_counter()
+            _governor_prev_cycle_tokens = len(tokens)
         if first_round_snapshot is None and step >= 1:
             # Top of iteration 2: the cumulative timers now hold exactly
             # round 1's totals. Pure bookkeeping — no evaluation forced.

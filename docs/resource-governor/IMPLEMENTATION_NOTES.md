@@ -516,10 +516,13 @@ gaps in GPU dispatch, rather than trusting the static reading above.
 ## 4. What this pass did *not* do (explicitly, per brief section 25)
 
 Brief section 25 requires "at least one real MLX inference workload" to
-validate each prefill/decode hook — **not done in this reconnaissance
-pass**, which was static code reading only. Blocked this session by low
-disk space on the dev machine (see PROJECT_STATUS.md / LLM_NOTES.md); do
-this before trusting any hook placement above. Also not done:
+validate each prefill/decode hook — **not done in the original
+reconnaissance pass**, which was static code reading only (blocked at
+the time by low disk space on the dev machine). **Since done**, in a
+later implementation session, against a real downloaded model via a live
+`mtplx serve` process for both the AR and MTP hooks — see section 5
+below and `PROJECT_STATUS.md`'s real-model-validation entries. Still not
+done:
 - `mtplx/cache_state.py` (4,777 lines) and `mtplx/session_bank.py` (2,612
   lines) were located but not read — needed before touching memory-safety
   admission (brief section 14).
@@ -534,5 +537,66 @@ this before trusting any hook placement above. Also not done:
   test was needed to settle that; a targeted import-graph grep was
   conclusive.)
 
-These are the concrete next steps before Phase 1 (minimal decode governor)
-implementation begins.
+---
+
+## 5. MTP hook note (implementation session, resolves Q6/Q7, not reconnaissance)
+
+Q6 and Q7 above were left genuinely open by Phase 0 reconnaissance. They
+were resolved while actually implementing the `generate_mtpk` decode hook,
+by reading the current code directly (not by further static guessing):
+
+**Q6 (exact cycle boundary) — resolved, and the first hypothesis was
+wrong.** `generate_mtpk`'s internal `emit_new_tokens()` helper (defined
+once, called from ~10 different branch sites across the function's
+verify_strategy/draft_core branches) looked like a clean single per-cycle
+convergence point worth hooking directly. **It is not.** Reading the
+call sites showed several fire mid-cycle — e.g. one call happens
+immediately after the primary token is sampled, before that cycle's
+draft-forward and target-verify work has even happened yet, with the
+comment at that site literally noting "everything later this cycle...
+validates windows that FOLLOW the primary." A hook placed inside
+`emit_new_tokens()` itself would have double-counted tokens across the
+multiple calls within one cycle, and worse, would have folded a prior
+governor sleep's duration into the *next* call's "work" measurement
+(since the second call in a cycle would measure elapsed time including
+the first call's sleep) — a real correctness bug, not a cosmetic one,
+caught before it was committed by writing a regression test
+(`test_yields_never_exceed_one_per_cycle_transition` in
+`tests/test_resource_governor_mtp_integration.py`) and manually
+inspecting governor stats against known cycle counts.
+
+**The actual hook**: pace at the top of `generate_mtpk`'s
+`while len(tokens) < max_tokens:` loop, against the *previous*
+iteration's measured wall time and token-count delta, before that
+iteration's own work begins — not inside `emit_new_tokens()` at all. This
+sidesteps the multi-call-per-cycle problem entirely: "top of iteration N"
+is unambiguous regardless of how many internal helper calls iteration
+N-1 made. Tradeoff: the very last cycle's work is never paced against
+(no "next iteration" exists to trigger it) — negligible, since generation
+is ending anyway.
+
+**Q7 (what counts as governed "work") — resolved.** The codebase's own
+telemetry keeps `draft_time`/`verify_time` as separate accumulators, never
+summed into one "cycle work" variable, so there's no existing convention
+to just reuse here (unlike the AR/prefill hooks, which reused an existing
+sync point directly). The MTP hook's `work_seconds` is a new, whole-cycle
+wall-time measurement (draft-forward + target-verify + commit +
+`emit_new_tokens()`'s own housekeeping, which can itself block on a real
+`mx.synchronize` barrier per its docstring) — a deliberate choice matching
+brief section 7's "pace on total measured active work time," not an
+existing measurement being repurposed.
+
+**Validated against a real downloaded model, not just a toy model**: via
+a live `mtplx serve` process running `Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed`
+at its **default** `generation_mode` (i.e. without forcing `"ar"`, which
+is what the earlier AR-only hook required and which was the whole reason
+this MTP hook was urgent — see PROJECT_STATUS.md's real-model-validation
+entries for the full before/after). A 150-token request took 1.03s at
+`max` and 3.11s at `interactive` (`decode.effective_duty_cycle: 0.4`
+exactly, `natural_tps_ema` ≈139.3, `delivered_tps_ema` ≈55.7 — 139.3 ×
+0.4 ≈ 55.7, matches the formula), switched live via the admin API with no
+restart, on the model's own default MTP decode path.
+
+These are the concrete next steps before further governor phases
+(MTPLX_AR_PIPELINE lane, batched decode, remaining prefill functions,
+memory-safety admission) begin.

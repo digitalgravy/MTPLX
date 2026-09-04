@@ -2,37 +2,27 @@
 
 ## Current objective
 
-**Hook the MTP decode path (`generate_mtpk`).** Phases 0-4 are done —
-core governor, decode pacing (AR lane), prefill pacing, runtime admin
-API, CLI/config integration. Real-model validation (2026-09-04, disk
-space now healthy — 143GB free, was a transient/external issue, not this
-project's fault) proved the mechanism works correctly end-to-end
-(natural ~95 tok/s decode dropped to ~38 tok/s delivered at
-`interactive`'s 0.4 duty cycle on a real Qwen3.5-4B model) — **but also
-revealed a critical scope gap**: this test model's default
-`generation_mode` is `"mtp"`, not `"ar"`, and the governor currently only
-hooks the AR path. On a real server with default settings, **the
-governor does nothing at all** unless a caller explicitly requests
-`generation_mode: "ar"`. Since MTP is MTPLX's flagship/default mode for
-MTP-capable models, this is the most important remaining piece for the
-project's real-world usefulness — bigger priority than anything else
-left on the list. See `docs/resource-governor/IMPLEMENTATION_NOTES.md`
-and `MTPLX_RESOURCE_GOVERNOR_CODEX_BRIEF.md` for full context.
+**MTP decode path (`generate_mtpk`) is now hooked and validated — the
+critical gap is closed.** Phases 0-4 (core governor, AR decode pacing,
+prefill pacing, runtime admin API, CLI/config integration) plus the MTP
+hook are all done. Real-model validation confirmed both the original gap
+(governor did nothing on a model's default `generation_mode: "mtp"`) and
+the fix (governor now paces MTP decode correctly: a 150-token request at
+`interactive` took 3.11s vs. 1.03s at `max`, `effective_duty_cycle: 0.4`
+exactly, on the real downloaded `Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed`
+model via a live `mtplx serve` process). See
+`docs/resource-governor/IMPLEMENTATION_NOTES.md` section 5 for the full
+technical account, including a real correctness bug caught and fixed
+during design (see "Completed" below) before it ever reached a commit.
 
 ## In progress
 
-- [ ] Investigating `generate_mtpk` (`generation.py:7312`, ~5,300 lines)
-      to hook `after_decode_step` into its draft+verify+commit cycle. Not
-      yet started at time of writing this status — see brief section 30
-      Q6/Q7 (cycle boundary, whether draft-forward time should count as
-      governed "work") in IMPLEMENTATION_NOTES.md, both flagged there as
-      genuinely unresolved and needing a closer read before hooking.
+(nothing in progress at time of writing — MTP hook complete, about to commit)
 
 ## Next up
 
-- [ ] After `generate_mtpk` is hooked: hook `after_decode_step` into the
-      `MTPLX_AR_PIPELINE` lane and batched decode (`batched_decode.py`)
-      too — full decode coverage.
+- [ ] Hook `after_decode_step` into the `MTPLX_AR_PIPELINE` lane and
+      batched decode (`batched_decode.py`) too — full decode coverage.
 - [ ] Hook `after_prefill_chunk` into MTPLX's other three chunked-prefill
       implementations — `_prefill_restored_prompt_suffix`
       (`generation.py:2548`, warm-restore suffix), `_prefill_with_hidden_sequence`
@@ -350,6 +340,67 @@ and `MTPLX_RESOURCE_GOVERNOR_CODEX_BRIEF.md` for full context.
     default-configured MTPLX servers — only became concrete once tested
     against a real MTP-capable model's actual default behavior. Promoted
     to top priority.
+- [x] **MTP decode hook (`generate_mtpk`) — done, gap closed.**
+  - Forked out the investigation (tracing `generate_mtpk`'s ~5,300-line
+    decode loop, resolving IMPLEMENTATION_NOTES.md's open Q6/Q7) to avoid
+    loading all of it into context, then **independently re-verified the
+    fork's key claim myself before writing any code** — good thing: the
+    fork recommended hooking pacing inside `emit_new_tokens()` (a helper
+    called from ~10 branch sites, looked like a single per-cycle
+    convergence point), but reading the actual call sites showed several
+    fire **mid-cycle** (e.g. immediately after the primary token is
+    sampled, before that cycle's draft-forward/target-verify work has
+    even happened — one site's own comment says as much). Hooking there
+    as originally planned would have double-counted tokens and, worse,
+    folded a prior governor sleep's duration into the next call's "work"
+    measurement — a real correctness bug in speculative-decoding timing,
+    not cosmetic.
+  - **Redesigned before writing the real implementation**: pace at the
+    top of the `while` loop against the *previous* iteration's measured
+    wall time and token delta, before that iteration's own work begins,
+    instead of inside `emit_new_tokens()`. This sidesteps the
+    multi-call-per-cycle ambiguity entirely — "top of iteration N" is a
+    single unambiguous point regardless of how many internal calls
+    iteration N-1 made. Full reasoning recorded in
+    `docs/resource-governor/IMPLEMENTATION_NOTES.md` section 5 (also
+    resolves Q6/Q7 there) and inline code comments at the hook site.
+  - Threaded a new `resource_governor` parameter through `generate_mtpk`
+    (also passed into its own internal `restore_or_prefill_prompt_state`
+    call, which — for free, reusing all of Phase 2's existing work —
+    gives MTP-mode prefill pacing too, not just decode), and into
+    `_run_generation`'s `generate_mtpk(...)` call site in
+    `server/openai.py` (the branch next to the already-hooked
+    `generate_ar` branch).
+  - Tests: `tests/test_resource_governor_mtp_integration.py` (6 tests,
+    real MLX compute via the same deterministic cyclic toy-model pattern
+    `tests/test_loop_guard.py` already uses for `generate_mtpk`) —
+    confirms governor-off/max-profile are no-ops, confirms throttled and
+    unthrottled output are byte-identical, confirms wall-clock actually
+    slows down, confirms `abort_check` cuts a pending yield short, and
+    **a dedicated regression guard**
+    (`test_yields_never_exceed_one_per_cycle_transition`) asserting
+    `yields <= steps` and `steps < token_count` — this test exists
+    specifically to catch a reintroduction of the double-counting bug
+    the corrected design avoids.
+  - Ran the new tests plus a ~30-file regression batch covering
+    everything that touches `generate_mtpk` — only the same 7
+    already-documented pre-existing numerical-precision failures
+    (`test_graphbank_compiled_verify.py` ×6, `test_ccopy_bank_route.py`
+    ×1) appeared; nothing new broke.
+  - **Real-model validation, live server, default generation mode** (the
+    actual point of this work): started `mtplx serve` with
+    `Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed`, sent a 150-token
+    request with `generation_mode` left at its default (**not** forced
+    to `"ar"` this time — confirming the fix, not just the mechanism) at
+    `interactive`: 3.11s, `decode.effective_duty_cycle: 0.4` exactly,
+    `natural_tps_ema` ≈139.3, `delivered_tps_ema` ≈55.7 (139.3 × 0.4 ≈
+    55.7). Same request at `max`, switched live via the admin API: 1.03s.
+    **This is the fix working end-to-end on the model's actual default
+    configuration** — the scenario that was completely inert before this
+    hook.
+  - Not yet done: `MTPLX_AR_PIPELINE` lane, batched decode
+    (`batched_decode.py`), and the remaining three prefill functions are
+    still unhooked (see "Next up").
 
 ## Blocked / needs investigation
 
@@ -403,6 +454,25 @@ recorded for completeness per brief section 25's testing discipline.
   are upstream MTPLX correctness issues unrelated to the resource governor
   and should not be "fixed" as part of this project; flag to upstream
   separately if the user wants to.
+- **New, discovered while regression-testing the MTP hook — test-order
+  pollution, pre-existing, out of scope**: running
+  `tests/test_no_mlx_imports.py tests/test_public_cli.py tests/test_runtime_kpis.py`
+  (CONTRIBUTING.md's own recommended smoke subset) followed by
+  `tests/test_loop_guard.py` in the *same* pytest process makes
+  `test_generate_mtpk_guard_breaks_the_cycle` fail with `RuntimeError:
+  capture commit failed after MTPLX_SKIP_VERIFY_SNAPSHOT=1`
+  (`generation.py:12097`, or `:12067` before the MTP hook's line
+  additions — same bug, confirmed via `git stash` that it reproduces
+  identically on the pre-MTP-hook code, so it's not something this
+  project introduced). Passes in isolation and passes as part of the
+  full `pytest tests/` run (alphabetical collection order runs
+  `test_loop_guard.py` before the three polluting files, so it never
+  surfaced in the Phase 0 baseline). Something in one of those three
+  files leaves global/env state that `test_generate_mtpk_guard_breaks_the_cycle`
+  is sensitive to; root cause not investigated (out of scope for this
+  project) — worth a `git bisect`-style narrowing if the user wants to
+  fix it, or just avoid chaining ad-hoc file lists after that specific
+  smoke subset in one pytest invocation.
 
 ## Benchmark backlog
 
