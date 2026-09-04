@@ -154,6 +154,7 @@ from mtplx.fan_mode import (
     FAN_MODE_SMART,
     normalize_fan_mode,
 )
+from mtplx.resource_governor import BUILTIN_PROFILES, ResourceGovernor
 from mtplx.reasoning_codecs import (
     QWEN_STYLE_REASONING_BLOCK_RE,
     QWEN_STYLE_REASONING_CLOSE_RE,
@@ -1333,6 +1334,17 @@ class FanModeRequest(BaseModel):
     timeout_s: float | None = Field(default=None, ge=0.0, le=120.0)
 
 
+class ResourceGovernorProfileRequest(BaseModel):
+    """Body for ``POST /admin/resource-governor/profile``. See
+    docs/resource-governor/ — ``profile`` selects a built-in QoS profile
+    (max/balanced/interactive/protect/pause); no custom per-field overrides
+    yet (that's config/CLI territory, not this runtime endpoint)."""
+
+    profile: str = Field(
+        ..., pattern="^(" + "|".join(sorted(BUILTIN_PROFILES)) + ")$"
+    )
+
+
 class CompletionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -2294,6 +2306,10 @@ class ServerState:
             else None
         )
         self.rate_limiter = _RateLimiter(args.rate_limit)
+        # Defaults to the "max" profile (duty cycle 1.0 both lanes): zero
+        # intentional pacing until an operator explicitly switches profiles
+        # via the /admin/resource-governor API. See docs/resource-governor/.
+        self.resource_governor = ResourceGovernor()
         startup_backend = descriptor_for_backend_id(getattr(args, "backend_id", None))
         minimum_resident_bytes = None
         resident_floor_label = "The model"
@@ -15269,6 +15285,8 @@ def _mtplx_app_capabilities() -> dict[str, Any]:
         "flight": "/v1/mtplx/flight",
         "settings": "/v1/mtplx/settings",
         "cancel": "/v1/mtplx/cancel/{request_id}",
+        "resource_governor": "/admin/resource-governor",
+        "resource_governor_profile": "/admin/resource-governor/profile",
         "dashboard": "/dashboard/",
         "app_capabilities": "/v1/mtplx/app/capabilities",
     }
@@ -15307,6 +15325,7 @@ def _mtplx_app_capabilities() -> dict[str, Any]:
             "ar_batching_live": True,
             "concurrent_mtp_ar_fallback": True,
             "mtp_cohorts_experimental": True,
+            "resource_governor": True,
             "mtp_cohorts_default_enabled": False,
             "startup_ownership": True,
             "strict_max_fan_startup": True,
@@ -22494,6 +22513,7 @@ def _run_generation(
                             if cancel_event is not None
                             else (lambda: _pressure_abort_requested(state))
                         ),
+                        resource_governor=state.resource_governor,
                     )
                 else:
                     adaptive_policy = _make_adaptive_policy(
@@ -28224,6 +28244,29 @@ def create_app(state: ServerState) -> FastAPI:
         archived = state.sessions.archive_cold_tier()
         archived["ram_cache_unchanged"] = True
         return archived
+
+    @app.get("/admin/resource-governor")
+    def admin_resource_governor() -> dict[str, Any]:
+        return state.resource_governor.stats()
+
+    @app.post("/admin/resource-governor/profile")
+    def admin_set_resource_governor_profile(
+        request: ResourceGovernorProfileRequest,
+    ) -> dict[str, Any]:
+        # Docs/brief section 12 illustrates this as PUT, but every other
+        # mutation endpoint in this file (settings, fan mode, cache/session
+        # clear) is POST — following existing MTPLX convention per the
+        # brief's own instruction over its illustrative example.
+        governor = state.resource_governor
+        previous = governor.current_profile().name
+        governor.set_profile(request.profile)
+        if request.profile != previous:
+            LOGGER.info(
+                "resource governor profile: %s -> %s (source: runtime API)",
+                previous,
+                request.profile,
+            )
+        return governor.stats()
 
     @app.get("/v1/models")
     def list_models(capability: str | None = None) -> dict[str, Any]:

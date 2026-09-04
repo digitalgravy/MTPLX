@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from mtplx.backends.gemma4_assistant import _gemma4_draft_position
 from mtplx.profiles import DEFAULT_HF_MODEL_ID, get_profile
+from mtplx.resource_governor import ResourceGovernor
 from mtplx.server import openai
 from mtplx.server.openai import _RateLimiter, create_app, parse_args
 
@@ -1865,6 +1866,7 @@ def _fake_state(*, api_key: str | None = None, rate_limit: int = 0):
         generation_executor=FakeExecutor(),
         # Dashboard primitives mirror what ServerState.__init__ allocates.
         dashboard=DashboardState(),
+        resource_governor=ResourceGovernor(),
     )
 
 
@@ -13951,3 +13953,93 @@ def test_warmup_rows_stay_out_of_dashboard_metrics_ring():
         state, {"request_id": "warm-2", "warmup": True, "completion_tokens": 8}
     )
     assert state.last_metrics[-1]["request_id"] == "real-1"
+
+
+# ---- resource governor admin endpoints (docs/resource-governor/) -------
+
+
+def test_resource_governor_admin_get_returns_default_max_profile():
+    state = _fake_state(api_key="mtplx-local")
+    client = TestClient(create_app(state))
+
+    response = client.get(
+        "/admin/resource-governor", headers={"Authorization": "Bearer mtplx-local"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is True
+    assert body["profile"] == "max"
+    assert body["decode_duty_cycle"] == 1.0
+    assert body["prefill_duty_cycle"] == 1.0
+    assert "decode" in body and "prefill" in body
+
+
+def test_resource_governor_admin_set_profile_switches_live_without_restart():
+    state = _fake_state(api_key="mtplx-local")
+    client = TestClient(create_app(state))
+    headers = {"Authorization": "Bearer mtplx-local"}
+
+    switched = client.post(
+        "/admin/resource-governor/profile",
+        json={"profile": "interactive"},
+        headers=headers,
+    )
+    assert switched.status_code == 200
+    assert switched.json()["profile"] == "interactive"
+    assert switched.json()["decode_duty_cycle"] == pytest.approx(0.40)
+    # No app/model reload involved — same in-process state object reflects it.
+    assert state.resource_governor.current_profile().name == "interactive"
+
+    fetched = client.get("/admin/resource-governor", headers=headers)
+    assert fetched.json()["profile"] == "interactive"
+
+    back = client.post(
+        "/admin/resource-governor/profile", json={"profile": "max"}, headers=headers
+    )
+    assert back.json()["profile"] == "max"
+    assert state.resource_governor.current_profile().name == "max"
+
+
+def test_resource_governor_admin_set_profile_rejects_unknown_name():
+    state = _fake_state(api_key="mtplx-local")
+    client = TestClient(create_app(state))
+
+    response = client.post(
+        "/admin/resource-governor/profile",
+        json={"profile": "turbo-nitro"},
+        headers={"Authorization": "Bearer mtplx-local"},
+    )
+    assert response.status_code == 422
+    assert state.resource_governor.current_profile().name == "max"
+
+
+def test_resource_governor_admin_endpoints_require_auth():
+    state = _fake_state(api_key="mtplx-local")
+    client = TestClient(create_app(state))
+
+    assert client.get("/admin/resource-governor").status_code == 401
+    assert (
+        client.post(
+            "/admin/resource-governor/profile", json={"profile": "balanced"}
+        ).status_code
+        == 401
+    )
+    # Unauthenticated attempts must not have mutated shared server state.
+    assert state.resource_governor.current_profile().name == "max"
+
+
+def test_resource_governor_admin_logs_profile_transition(caplog):
+    import logging
+
+    state = _fake_state(api_key="mtplx-local")
+    client = TestClient(create_app(state))
+    with caplog.at_level(logging.INFO, logger="mtplx.server.openai"):
+        client.post(
+            "/admin/resource-governor/profile",
+            json={"profile": "protect"},
+            headers={"Authorization": "Bearer mtplx-local"},
+        )
+    assert any(
+        "resource governor profile: max -> protect" in record.message
+        for record in caplog.records
+    )

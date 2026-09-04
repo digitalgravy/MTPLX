@@ -388,40 +388,97 @@ rediscover:
   `_prefill_committed_mtp_history_streaming` (committed/last_window MTP
   history, `:5414`), `_prefill_with_hidden_sequence` (`:5656`).
 
+## Session 1 continued — Phase 3 (same day, 2026-09-04)
+
+Implemented and tested the runtime admin API and live profile switching.
+Full detail in PROJECT_STATUS.md's Phase 3 "Completed" entry; key things
+not to rediscover:
+
+- `ServerState.__init__` (`server/openai.py`) now owns
+  `self.resource_governor = ResourceGovernor()`, defaulting to `max`
+  (no-op) on every server start — there is no CLI/config/env way to start
+  it on a different profile yet, that's Phase 4. Right now the *only*
+  lever is the new HTTP API, and it resets to `max` on every restart (no
+  persistence across restarts — also Phase 4 territory: "persisted
+  config").
+- Chose `POST /admin/resource-governor/profile` over the brief's
+  illustrative `PUT` — every other mutation route in this file is POST.
+  Don't "fix" this to PUT later without a real reason; it was a
+  deliberate convention match, not an oversight.
+- The live `generate_ar(...)` call in `_run_generation`
+  (`server/openai.py`) now gets `resource_governor=state.resource_governor`
+  — and for free, its existing `abort_check` lambda (already checking
+  `cancel_event.is_set() or _pressure_abort_requested(state)`) is what
+  the governor's yield-sleep polls, so cancellation-safety (brief section
+  18/section 30 Q15) came from reusing what was already there, not new
+  plumbing.
+- `_fake_state()` in `tests/test_server_openai.py` (shared by ~50
+  existing tests) got one new field, `resource_governor=ResourceGovernor()`
+  — necessary because the new routes read `state.resource_governor`.
+  Confirmed via full-file test run this didn't disturb any other test.
+- Verified (not assumed) that no new auth code was needed: Phase 0 recon
+  predicted the global `_AuthRateLimitMiddleware` would cover new routes
+  automatically, and `test_resource_governor_admin_endpoints_require_auth`
+  proves it — unauthenticated GET/POST both 401, and confirms the
+  attempted POST didn't mutate `state.resource_governor` either (not just
+  that the HTTP call failed).
+- Ran the new tests, the full `test_server_openai.py` (365 tests),
+  `test_dashboard_endpoints.py`, and a ~75-file batch covering everything
+  else touching `server/openai.py`. Same two pre-existing failure
+  categories as always (low-disk SSD guard, `test_graphbank_compiled_verify.py`
+  numerical precision) — nothing new.
+- Still open for a future phase: exercising this against an actual
+  running `mtplx serve` process (curl/httpx against a real subprocess),
+  not just `TestClient` against an in-process fake state. Also open:
+  whether/how `admission_allowed()` (already implemented in the governor
+  core since Phase 1, unused until now) should actually gate the live
+  request-admission path — Phase 0 recon found there's no live admission
+  enforcement to hook into at all today (see IMPLEMENTATION_NOTES.md's
+  "Resolved" note under Q12), so this is genuinely new wiring, not a hook
+  into something existing. That's Phase 5/6 territory per the brief's own
+  phasing, not done in Phase 3.
+
 ### Unresolved questions / exact next action for a fresh session
 
 Phase 0 done; Phase 1 (decode, classic AR lane) done; Phase 2 (prefill,
-plain `_prefill()` only) done — all committed and pushed. If you're
-picking this up cold:
+plain `_prefill()` only) done; Phase 3 (runtime admin API + live
+switching) done — all committed and pushed. If you're picking this up
+cold:
 
 1. Read `docs/resource-governor/IMPLEMENTATION_NOTES.md` (including its
-   Phase 2 correction note) and this file's Phase 1/Phase 2 sections above
+   Phase 2 correction note) and this file's Phase 1/2/3 sections above
    before writing more governor code — the reconnaissance, the
-   async-vs-sync API decision, and the `_prefill` vs
-   `_prefill_with_hidden_sequence` hook-placement choice are all already
-   settled; don't re-derive them.
+   async-vs-sync API decision, the `_prefill` vs
+   `_prefill_with_hidden_sequence` hook-placement choice, and the
+   POST-not-PUT admin route decision are all already settled; don't
+   re-derive them.
 2. Check current disk space (`df -h /`). If there's now >5-10GB free,
    retry `mtplx pull Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed` then
-   `mtplx run "hello" --model Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed`
-   with a `resource_governor` wired in (and `MTPLX_SUSTAINED_PREFILL=1` if
-   you want to see prefill pacing specifically), to get the real-model
-   validation both Phase 1 and Phase 2 are still missing. If disk is still
-   tight, ask the user rather than guessing.
+   `mtplx serve --model Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed`, hit
+   `POST /admin/resource-governor/profile {"profile": "interactive"}`
+   against the real running server, and confirm decode/prefill actually
+   slow down — the real-model validation every phase so far has been
+   missing. If disk is still tight, ask the user rather than guessing.
 3. Pick the next concrete slice rather than a big bundled patch (brief
    section 26 discipline: small, testable, separately-committed changes).
    Reasonable next options, roughly in ascending order of difficulty:
+   - Phase 4: CLI + persisted config (`--resource-profile`,
+     `--prefill-duty-cycle`, `--decode-duty-cycle`, `--min-decode-tps`),
+     so a server can start on a non-`max` profile instead of always
+     needing a runtime API call after startup. `cli.py`'s
+     `_add_batching_args()` (`cli.py:703-740`, per IMPLEMENTATION_NOTES.md
+     section 1) is the natural place for the new flags;
+     `config.py:_apply_profile_default()`-style precedence
+     (`config.py:258-266`) is the natural place for config-file
+     resolution. Log effective values at startup per brief section 11.
    - Hook `after_decode_step` into the `MTPLX_AR_PIPELINE` lane
      (`generation.py`, the `_lane_step`/`while True:` block — re-find the
      exact line, code has moved since Phase 1's notes; the real sync
      point there is `tok_lazy.item()`).
    - Hook `after_prefill_chunk` into the remaining three prefill
-     functions listed above (restored-suffix, committed-history-streaming,
-     hidden-sequence) — same pattern as `_prefill`, smaller individual
-     diffs.
-   - Phase 3: runtime admin API — extend `/v1/mtplx/settings`
-     (`server/openai.py`) with governor knobs; recon already found the
-     exact mutable-settings-list mechanism to follow
-     (`DASHBOARD_MUTABLE_SETTINGS_KEYS`, `openai.py:15151`).
+     functions (restored-suffix `:2548`, committed-history-streaming
+     `:5414`, hidden-sequence `:5656`) — same pattern as `_prefill`,
+     smaller individual diffs.
    - MTP (`generate_mtpk`) and batched decode hooks are bigger lifts
      (larger functions, less-traced sync boundaries per
      IMPLEMENTATION_NOTES.md Q6/Q7) — save for later.

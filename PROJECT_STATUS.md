@@ -2,10 +2,10 @@
 
 ## Current objective
 
-Phase 2 — prefill governor: hook `after_prefill_chunk` into MTPLX's
-chunked prefill loop(s). Phase 0 (reconnaissance) and Phase 1 (minimal
-decode governor on the classic AR lane) are done — see
-`docs/resource-governor/IMPLEMENTATION_NOTES.md`. See
+Phase 4 — CLI and persisted config for resource-governor profiles
+(`--resource-profile`, `--prefill-duty-cycle`, `--decode-duty-cycle`,
+`--min-decode-tps`), plus effective-value reporting. Phases 0-3 are done
+— see `docs/resource-governor/IMPLEMENTATION_NOTES.md`. See
 `MTPLX_RESOURCE_GOVERNOR_CODEX_BRIEF.md` for the full spec.
 
 ## In progress
@@ -45,11 +45,12 @@ decode governor on the classic AR lane) are done — see
       plain `_prefill()` (`generation.py:5317+`), the one `generate_ar`'s
       default `mtp_history_policy="cycle"` cold-start path actually uses
       (also shared by `generate_mtp1`/`generate_mtpa`, not `generate_mtpk`).
-- [ ] Phase 3: runtime admin API (`GET/PUT` equivalents of
-      `/v1/mtplx/settings`, extended for governor knobs) + live profile
-      switching.
 - [ ] Phase 4: CLI (`--resource-profile`, `--prefill-duty-cycle`,
-      `--decode-duty-cycle`, `--min-decode-tps`) + persisted config.
+      `--decode-duty-cycle`, `--min-decode-tps`) + persisted config +
+      effective-value reporting/logging at startup.
+- [ ] Runtime-verify the admin API against a real running `mtplx serve`
+      process (so far only exercised via FastAPI `TestClient` against a
+      fake/toy `ServerState`, not a live server process).
 
 ## Completed
 
@@ -197,6 +198,69 @@ decode governor on the classic AR lane) are done — see
     capture split out, one new `if resource_governor is not None:`
     block) — no existing behavior changed when `resource_governor` is
     unset.
+- [x] Phase 3 — runtime admin API and live profile switching implemented
+  and tested:
+  - `ServerState.__init__` (`server/openai.py`) now constructs
+    `self.resource_governor = ResourceGovernor()`, defaulting to the
+    `max` profile — zero intentional pacing until an operator explicitly
+    switches it. The live `generate_ar(...)` call site inside
+    `_run_generation` (`server/openai.py`, `_run_generation`'s AR branch)
+    now passes `resource_governor=state.resource_governor`, and — for
+    free, no extra plumbing needed — the same lambda already used for
+    `abort_check` (`cancel_event.is_set() or _pressure_abort_requested(state)`)
+    is what the governor's yields poll for cancellation-safety, so a
+    client disconnect or shed-under-pressure event interrupts an
+    in-progress governor sleep exactly like it already interrupts
+    generation.
+  - New routes in `create_app` (`server/openai.py`), added next to the
+    existing `/admin/*` family: `GET /admin/resource-governor` (returns
+    `ResourceGovernor.stats()`) and `POST /admin/resource-governor/profile`
+    (body: `{"profile": "interactive"}`, validated by a Pydantic
+    `Field(pattern=...)` built from `BUILTIN_PROFILES` so the two can't
+    drift apart). **Deviated from the brief's illustrative `PUT`** for
+    the profile-switch route — every other mutation endpoint in this
+    file (`/v1/mtplx/settings`, fan mode, cache/session clear) is `POST`,
+    and the brief itself says to follow existing MTPLX convention over
+    its own illustrative example.
+  - No new auth code needed, as Phase 0 recon predicted: the global
+    `_AuthRateLimitMiddleware` already covers these new routes
+    automatically. Verified this explicitly with a test rather than
+    trusting the prediction (`test_resource_governor_admin_endpoints_require_auth`).
+  - Structured logging on profile change, matching the brief's exact
+    example format: `resource governor profile: max -> protect (source:
+    runtime API)`, logged via the existing `mtplx.server.openai` logger.
+    Only logs on an actual change (setting the same profile again is a
+    no-op, no log spam).
+  - Registered the two new routes in the existing
+    `_mtplx_app_capabilities()` endpoint-discovery map and added a
+    `"resource_governor": True` feature flag, matching how every other
+    admin surface in that map is already discoverable by native app
+    shells/the dashboard.
+  - Tests: 5 new tests in `tests/test_server_openai.py` using the
+    existing `_fake_state()`/`TestClient` pattern (added
+    `resource_governor=ResourceGovernor()` to `_fake_state()`'s
+    `SimpleNamespace`, one line, since ~50 other tests share that
+    helper) — GET returns the default max-profile stats shape, POST
+    switches the profile live (verified via both the HTTP response and
+    direct in-process state inspection — "no restart" isn't just
+    asserted, it's proven by reading `state.resource_governor` right
+    after the request), an invalid profile name is rejected with 422 and
+    leaves state unchanged, unauthenticated requests get 401 and don't
+    mutate state, and the structured log line fires with the exact
+    expected format on a real transition.
+  - Ran the new tests plus the full `tests/test_server_openai.py` (365
+    tests) and `tests/test_dashboard_endpoints.py`, then a ~75-file
+    regression batch covering everything else that touches
+    `server/openai.py` — only the same two already-documented
+    pre-existing failure categories appeared (low-disk SSD guard,
+    numerical precision in `test_graphbank_compiled_verify.py`); nothing
+    new broke.
+  - **Not yet done**: exercising the admin API against an actual running
+    `mtplx serve` process end-to-end (only `TestClient` against a
+    fake/toy state so far); CLI/config-driven profile selection at
+    startup is explicitly Phase 4, not done here — right now the *only*
+    way to change the profile is the new HTTP API, and it always starts
+    at `max` on every server start.
 
 ## Blocked / needs investigation
 
