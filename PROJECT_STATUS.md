@@ -833,6 +833,27 @@ recorded for completeness per brief section 25's testing discipline.
   step counts updated to match within one poll cycle with no manual
   interaction (previously would have required a page reload to show
   anything but the initial snapshot).
+- **Follow-up report from the same user (2026-09-04), investigated,
+  not a bug**: "it started changing really nicely then it just stopped
+  updating when hitting the buttons." Reproduced twice with a real
+  server under real generation load (curled `/v1/chat/completions`
+  directly, watched the panel), and both times cross-checked the raw
+  `GET /admin/resource-governor` response against what the panel showed
+  at the moment it looked "frozen" — they matched exactly. Cause: the
+  in-flight generation had genuinely finished (hit `max_tokens`,
+  `finish_reason: "length"`) right around when the profile was switched,
+  so `decode.steps`/`yields` correctly stopped moving because nothing
+  was generating anymore — not a UI or caching bug. A live continuous
+  generation switched mid-stream (tested with `interactive` and
+  `pause`) kept updating correctly through and after the click every
+  time. This class of report is easy to keep re-litigating without a
+  clear tell, since a truly-stuck panel and a correctly-idle one look
+  identical at a glance — addressed by adding an "updated Xs ago"
+  heartbeat next to the connection status in `mtplx-qos-ui.html` (ticks
+  every second, resets to "updated just now" on every successful
+  poll/switch response) plus a footer note, so a live-but-idle panel is
+  now visibly distinguishable from a genuinely stuck one without
+  needing to cross-check `curl` by hand.
 
 ## Benchmark backlog
 

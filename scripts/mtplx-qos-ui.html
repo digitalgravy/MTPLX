@@ -228,6 +228,7 @@
       <span id="connDot" class="dot"></span>
       <span id="connText">Not connected yet</span>
       <span style="flex:1;"></span>
+      <span id="lastUpdated" class="subtitle" title="Confirms the panel is still polling — a still count means no generation happened between polls, not that this is stuck"></span>
       <button id="refreshBtn" title="Refresh now">Refresh</button>
     </div>
     <div class="lanes">
@@ -246,7 +247,10 @@
   </div>
 
   <footer>
-    Auto-refreshes every 3s. Same API as <code>scripts/mtplx-qos</code> — see
+    Auto-refreshes every 3s. "Steps / yields" only move while a request is
+    actually being generated — a still count with "updated Xs ago" ticking
+    up above means nothing is generating right now, not that this panel is
+    stuck. Same API as <code>scripts/mtplx-qos</code> — see
     <a href="https://github.com/digitalgravy/MTPLX/blob/feature/resource-governor/docs/resource-governor/README.md">docs/resource-governor/README.md</a>.
   </footer>
 </main>
@@ -272,6 +276,7 @@
     profileButtons: document.getElementById("profileButtons"),
     connDot: document.getElementById("connDot"),
     connText: document.getElementById("connText"),
+    lastUpdated: document.getElementById("lastUpdated"),
     refreshBtn: document.getElementById("refreshBtn"),
     prefillDuty: document.getElementById("prefillDuty"),
     prefillSteps: document.getElementById("prefillSteps"),
@@ -281,7 +286,23 @@
   };
 
   var pollTimer = null;
+  var heartbeatTimer = null;
   var switching = false;
+  var lastUpdatedAt = null;
+
+  function noteUpdated() {
+    lastUpdatedAt = Date.now();
+    renderLastUpdated();
+  }
+
+  function renderLastUpdated() {
+    if (lastUpdatedAt === null) {
+      els.lastUpdated.textContent = "";
+      return;
+    }
+    var secs = Math.round((Date.now() - lastUpdatedAt) / 1000);
+    els.lastUpdated.textContent = secs <= 1 ? "updated just now" : "updated " + secs + "s ago";
+  }
 
   function storageGet(key, fallback) {
     try {
@@ -378,6 +399,7 @@
 
   function renderStats(data) {
     clearError();
+    noteUpdated();
     els.connDot.className = "dot ok";
     els.connText.textContent = "Connected — profile: " + data.profile;
     renderProfileButtons(data.profile);
@@ -394,6 +416,8 @@
   function renderDisconnected(message) {
     els.connDot.className = "dot err";
     els.connText.textContent = "Not connected";
+    lastUpdatedAt = null;
+    renderLastUpdated();
     showError(message);
     renderProfileButtons(null);
   }
@@ -450,6 +474,8 @@
     pollTimer = setInterval(function () {
       if (!switching) refresh();
     }, POLL_MS);
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = setInterval(renderLastUpdated, 1000);
   }
 
   refresh();
