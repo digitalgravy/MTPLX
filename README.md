@@ -113,6 +113,29 @@ Sampler controls cover `temperature`, `top_p`, `top_k`, and the OpenAI penalty p
 Concurrent scheduler modes, ownership guarantees, and backend-specific
 implementations are documented in [Concurrency modes](docs/concurrency.md).
 
+## Resource governor *(this fork)*
+
+This fork adds a runtime-adjustable QoS layer for Macs that serve MTPLX
+while also being used for other things — gaming over Moonlight, other
+apps, a person at the keyboard. Prefill and decode pace themselves to a
+configurable duty cycle, switchable live with no restart and no model
+reload:
+
+```bash
+mtplx serve --model <model> --resource-profile interactive
+curl -X POST http://127.0.0.1:8000/admin/resource-governor/profile \
+  -H 'Content-Type: application/json' -d '{"profile": "balanced"}'
+./scripts/mtplx-qos auto   # Moonlight running -> interactive, else balanced
+```
+
+Five built-in profiles (`max`, `balanced`, `interactive`, `protect`,
+`pause`), a CLI/config/admin-API surface, and the standalone `mtplx-qos`
+policy tool. Full docs, including a plain-language guide for non-technical
+use, are in [`docs/resource-governor/`](docs/resource-governor/README.md)
+— start there, or [`docs/resource-governor/PLAIN_LANGUAGE_GUIDE.md`](docs/resource-governor/PLAIN_LANGUAGE_GUIDE.md)
+if you'd rather skip the technical version. Not yet part of upstream
+MTPLX — see [`docs/resource-governor/UPSTREAM_STATUS.md`](docs/resource-governor/UPSTREAM_STATUS.md).
+
 ## CLI quick reference
 
 ```bash
