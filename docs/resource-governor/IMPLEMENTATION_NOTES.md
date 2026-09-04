@@ -93,6 +93,23 @@ The same chunk-span helper is also consumed at `generation.py:2774`, `3598`,
 plain `_prefill()` at `generation.py:5316`, etc). All of them end each chunk
 iteration with an explicit `_eval(...)` call — see section 3 below.
 
+> **Phase 2 correction (implementation session, not reconnaissance):**
+> `_prefill_with_hidden_sequence` above was read as "the representative
+> case" for documenting the pattern, but tracing the actual call graph
+> shows it has exactly one caller, reached only when MTP history policy is
+> `committed`/`last_window` *and* sustained prefill is disabled — a narrow
+> combination. Plain `_prefill()` (`generation.py:5317` as of Phase 2) is
+> what `generate_ar`'s default `mtp_history_policy="cycle"` cold-start path
+> actually calls, and it's shared by `generate_mtp1`/`generate_mtpa` too.
+> The resource governor's `after_prefill_chunk` hook (Phase 2) was placed
+> in `_prefill()`, not here, for broader real coverage. Also: chunking
+> itself only activates when `MTPLX_SUSTAINED_PREFILL` is truthy (see
+> `_iter_prefill_chunk_spans`'s early-return for the single-span case) —
+> which the shipped default profile (`profiles.py`'s `SUSTAINED_PROFILE`,
+> `DEFAULT_PROFILE_NAME = "sustained"`) and `TURBO_PROFILE` both set, so
+> this is live under default settings, not a dead path. See
+> `PROJECT_STATUS.md`'s Phase 2 entry for full detail.
+
 **Autoregressive decode**
 `generate_ar()`, `mtplx/generation.py:5951` (until `generate_mtp1` at 6634).
 Contains multiple lanes selected by env flags:

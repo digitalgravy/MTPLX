@@ -2,10 +2,9 @@
 
 ## Current objective
 
-Phase 1 — minimal decode governor (brief section 33's "first useful
-milestone"): a working `ResourceGovernor` core, decode duty-cycle pacing
-hooked into the serial AR decode path, unit + real-MLX tests, negligible
-overhead at duty=1.0. Phase 0 (reconnaissance) is done — see
+Phase 2 — prefill governor: hook `after_prefill_chunk` into MTPLX's
+chunked prefill loop(s). Phase 0 (reconnaissance) and Phase 1 (minimal
+decode governor on the classic AR lane) are done — see
 `docs/resource-governor/IMPLEMENTATION_NOTES.md`. See
 `MTPLX_RESOURCE_GOVERNOR_CODEX_BRIEF.md` for the full spec.
 
@@ -37,8 +36,15 @@ overhead at duty=1.0. Phase 0 (reconnaissance) is done — see
 - [ ] Hook `after_decode_step` into the `MTPLX_AR_PIPELINE` lane and the
       MTP (`generate_mtpk`) / batched (`batched_decode.py`) decode paths
       (Phase 1 only covers the classic/default AR loop).
-- [ ] Phase 2: prefill governor (`after_prefill_chunk` hooked into
-      `_prefill_with_hidden_sequence`'s chunk loop, `generation.py:5655+`).
+- [ ] Hook `after_prefill_chunk` into MTPLX's other four chunked-prefill
+      implementations — `_prefill_restored_prompt_suffix`
+      (`generation.py:2548`, warm-restore suffix), `_prefill_with_hidden_sequence`
+      (`generation.py:5656`, MTP-hidden-sequence path, one caller),
+      `_prefill_committed_mtp_history_streaming` (`generation.py:5414`,
+      committed/last_window MTP history policy) — Phase 2 only covers
+      plain `_prefill()` (`generation.py:5317+`), the one `generate_ar`'s
+      default `mtp_history_policy="cycle"` cold-start path actually uses
+      (also shared by `generate_mtp1`/`generate_mtpa`, not `generate_mtpk`).
 - [ ] Phase 3: runtime admin API (`GET/PUT` equivalents of
       `/v1/mtplx/settings`, extended for governor knobs) + live profile
       switching.
@@ -137,6 +143,60 @@ overhead at duty=1.0. Phase 0 (reconnaissance) is done — see
     brief section 33's milestone-1 definition needs that. Duty-cycle
     values have not been benchmarked/tuned on real hardware (brief
     section 19 Test A-C) — not applicable until Phase 8.
+- [x] Phase 2 — prefill governor implemented and tested:
+  - Threaded a new `resource_governor: ResourceGovernor | None = None`
+    parameter from `generate_ar` → `restore_or_prefill_prompt_state` →
+    `_prefill` (`generation.py`), and hooked `after_prefill_chunk` right
+    after `_prefill`'s existing per-chunk `_eval(prefill)`/
+    `_eval_cache_roots(cache)` sync call — same "pace after the existing
+    sync point, don't add a new one" discipline as Phase 1's decode hook.
+  - **Notable discovery, not assumed from the brief or the Phase 0
+    recon**: MTPLX's chunked-prefill spans (`_iter_prefill_chunk_spans`)
+    only actually chunk when `MTPLX_SUSTAINED_PREFILL` is truthy —
+    otherwise the whole prompt body is treated as one span regardless of
+    `--prefill-chunk-tokens`/the chunk-size override. This is **not** a
+    dead code path in practice, though: `mtplx/profiles.py`'s
+    `SUSTAINED_PROFILE` (`name="sustained"`, the literal
+    `DEFAULT_PROFILE_NAME`) sets `MTPLX_SUSTAINED_PREFILL=1`, and
+    `TURBO_PROFILE` inherits the same env block — so chunked prefill (and
+    therefore this governor hook) is active under MTPLX's actual shipped
+    default and fastest-decode profiles, just not under every profile.
+    Worth remembering when writing Phase 4's config/CLI docs so the
+    governor's own docs don't imply prefill pacing is universal when the
+    underlying chunking itself is profile-gated.
+  - Chose plain `_prefill()` (`generation.py:5317+`) over
+    `_prefill_with_hidden_sequence()` (which Phase 0's IMPLEMENTATION_NOTES.md
+    called "the representative case" for reconnaissance purposes) after
+    tracing the actual call graph directly: `_prefill_with_hidden_sequence`
+    has exactly one caller, reached only when MTP history policy is
+    `committed`/`last_window` *and* sustained prefill is disabled — a
+    narrow combination. `_prefill()` is what `generate_ar`'s default
+    `mtp_history_policy="cycle"` cold-start path actually calls, and it's
+    shared by `generate_mtp1`/`generate_mtpa` too — broader real coverage
+    for the same amount of code touched. IMPLEMENTATION_NOTES.md's
+    original citation isn't wrong for what it was read for (which sync
+    call exists and where), just not the highest-value integration point;
+    not correcting that doc, this supersedes it for hook-placement
+    purposes.
+  - Tests: `tests/test_resource_governor_prefill_integration.py` (6
+    tests, same toy-MLX-model pattern as Phase 1, using
+    `MTPLX_SUSTAINED_PREFILL=1` + a forced small chunk size to exercise
+    multiple chunks per prefill) — confirms governor-off/max-profile are
+    no-ops, confirms a multi-chunk prefill fires the pacing hook once per
+    chunk, confirms throttled and unthrottled prefill produce identical
+    output, confirms wall-clock time actually increases under throttling,
+    and confirms a single-token prompt (no chunk loop at all) reports
+    zero prefill steps without erroring.
+  - Ran the new tests plus the same ~48-file regression batch used for
+    Phase 1, plus `tests/test_prefill_chunk_defaults.py` and
+    `tests/test_generation_sustained.py` directly (54 tests) — only the
+    same pre-existing `test_laguna_model.py` RAM-preflight failure
+    appeared; nothing else regressed.
+  - Diff to `generation.py` for this phase: 4 small, additive edits (two
+    new optional parameters threaded through, one `time.perf_counter()`
+    capture split out, one new `if resource_governor is not None:`
+    block) — no existing behavior changed when `resource_governor` is
+    unset.
 
 ## Blocked / needs investigation
 

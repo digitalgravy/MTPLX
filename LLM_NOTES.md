@@ -342,36 +342,92 @@ rediscover:
   above). Check `git status` and `rm -f ./1` before committing if you've
   run tests since the last commit.
 
+## Session 1 continued — Phase 2 (same day, 2026-09-04)
+
+Implemented and tested the prefill governor. Full detail in
+PROJECT_STATUS.md's Phase 2 "Completed" entry; key things not to
+rediscover:
+
+- Hooked `after_prefill_chunk` into plain `_prefill()`
+  (`generation.py:5317+`), **not** `_prefill_with_hidden_sequence` (which
+  Phase 0's IMPLEMENTATION_NOTES.md flagged as "the representative case"
+  for reconnaissance purposes — that was fine for documenting the pattern,
+  but tracing the real call graph in this session found
+  `_prefill_with_hidden_sequence` has exactly one caller, gated behind a
+  narrow MTP-history-policy combination). `_prefill()` is what
+  `generate_ar`'s default cold-start path actually calls, and it's shared
+  by `generate_mtp1`/`generate_mtpa` too. IMPLEMENTATION_NOTES.md now has
+  an inline correction note pointing here rather than being rewritten.
+- **Important, non-obvious discovery**: chunked prefill itself
+  (`_iter_prefill_chunk_spans`) only chunks when `MTPLX_SUSTAINED_PREFILL`
+  is truthy — otherwise it's a single span regardless of chunk-size
+  settings. This had me confused for one failed test run (see below) until
+  I traced it. It's not a dead path in practice: `profiles.py`'s
+  `SUSTAINED_PROFILE` (the literal default product profile) and
+  `TURBO_PROFILE` both set it, so real default usage does chunk. But any
+  future governor test or manual check that doesn't set
+  `MTPLX_SUSTAINED_PREFILL=1` will see exactly one "chunk" (the whole
+  prompt) and zero governor pacing calls, which can look like a bug when
+  it isn't — remember this env var.
+- Same threading pattern as Phase 1: new `resource_governor` parameter on
+  `_prefill`, `restore_or_prefill_prompt_state`, and passed through from
+  `generate_ar` — all default `None`, zero behavior change when unused.
+- Tests: `tests/test_resource_governor_prefill_integration.py`, same
+  toy-MLX-model approach as Phase 1's decode tests, but needs
+  `monkeypatch.setenv("MTPLX_SUSTAINED_PREFILL", "1")` plus
+  `prefill_chunk_size_override(2)` on a multi-token prompt to actually
+  exercise more than one chunk (a single-token prompt, or prefill without
+  that env var, never enters the chunk loop at all — see
+  `test_single_token_prompt_never_enters_chunk_loop`).
+- Ran the same ~48-file regression batch as Phase 1 plus
+  `test_prefill_chunk_defaults.py`/`test_generation_sustained.py`
+  directly — only the same pre-existing `test_laguna_model.py` RAM
+  failure, nothing new broke.
+- Still not hooked (deliberately deferred, same discipline as Phase 1):
+  `_prefill_restored_prompt_suffix` (warm-restore suffix, `:2548`),
+  `_prefill_committed_mtp_history_streaming` (committed/last_window MTP
+  history, `:5414`), `_prefill_with_hidden_sequence` (`:5656`).
+
 ### Unresolved questions / exact next action for a fresh session
 
-Phase 0 is done; Phase 1 (minimal decode governor, classic AR lane only)
-is done and committed. If you're picking this up cold:
+Phase 0 done; Phase 1 (decode, classic AR lane) done; Phase 2 (prefill,
+plain `_prefill()` only) done — all committed and pushed. If you're
+picking this up cold:
 
-1. Read `docs/resource-governor/IMPLEMENTATION_NOTES.md` and this file's
-   "Phase 1" section above in full before writing more governor code —
-   don't redo the reconnaissance or re-derive the async-vs-sync API
-   decision, both are already settled.
+1. Read `docs/resource-governor/IMPLEMENTATION_NOTES.md` (including its
+   Phase 2 correction note) and this file's Phase 1/Phase 2 sections above
+   before writing more governor code — the reconnaissance, the
+   async-vs-sync API decision, and the `_prefill` vs
+   `_prefill_with_hidden_sequence` hook-placement choice are all already
+   settled; don't re-derive them.
 2. Check current disk space (`df -h /`). If there's now >5-10GB free,
    retry `mtplx pull Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed` then
    `mtplx run "hello" --model Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed`
-   with a `resource_governor` wired in, to get the real-model validation
-   Phase 1 is still missing. If disk is still tight, ask the user rather
-   than guessing.
+   with a `resource_governor` wired in (and `MTPLX_SUSTAINED_PREFILL=1` if
+   you want to see prefill pacing specifically), to get the real-model
+   validation both Phase 1 and Phase 2 are still missing. If disk is still
+   tight, ask the user rather than guessing.
 3. Pick the next concrete slice rather than a big bundled patch (brief
-   section 26 discipline: small, testable, separately-committed changes):
+   section 26 discipline: small, testable, separately-committed changes).
+   Reasonable next options, roughly in ascending order of difficulty:
    - Hook `after_decode_step` into the `MTPLX_AR_PIPELINE` lane
-     (`generation.py`, the `_lane_step`/`while True:` block around line
-     6230-6335) — the real sync point there is `tok_lazy.item()`
-     (`generation.py:6265`-ish; re-check the exact line, code has moved).
-   - Or start Phase 2 (prefill governor): hook `after_prefill_chunk` into
-     `_prefill_with_hidden_sequence`'s chunk loop
-     (`generation.py:5655-5733`), right after its existing
-     `_eval(chunk_logits, chunk_hidden)` call — same pattern as decode,
-     see IMPLEMENTATION_NOTES.md section 1 "Sustained/chunked prefill".
-   - Either is reasonable to do next; MTP (`generate_mtpk`) and batched
-     decode are bigger lifts (bigger functions, less-traced sync
-     boundaries per IMPLEMENTATION_NOTES.md Q6/Q7) — save those for after
-     one of the above is solid.
+     (`generation.py`, the `_lane_step`/`while True:` block — re-find the
+     exact line, code has moved since Phase 1's notes; the real sync
+     point there is `tok_lazy.item()`).
+   - Hook `after_prefill_chunk` into the remaining three prefill
+     functions listed above (restored-suffix, committed-history-streaming,
+     hidden-sequence) — same pattern as `_prefill`, smaller individual
+     diffs.
+   - Phase 3: runtime admin API — extend `/v1/mtplx/settings`
+     (`server/openai.py`) with governor knobs; recon already found the
+     exact mutable-settings-list mechanism to follow
+     (`DASHBOARD_MUTABLE_SETTINGS_KEYS`, `openai.py:15151`).
+   - MTP (`generate_mtpk`) and batched decode hooks are bigger lifts
+     (larger functions, less-traced sync boundaries per
+     IMPLEMENTATION_NOTES.md Q6/Q7) — save for later.
 4. Keep committing docs (`PROJECT_STATUS.md`/`LLM_NOTES.md`) as you go,
    not just at the end of a session — brief section 28 is explicit about
    this ("Do not wait until the end of a session").
+5. **Check `git status` for a stray file named `1` before every commit**
+   if you've run tests since the last one (see the recurring
+   `MTPLX_EVAL_AUDIT` gotcha above) — this has now bitten twice.

@@ -3797,6 +3797,7 @@ def restore_or_prefill_prompt_state(
     store_prefix_snapshot: bool | None = None,
     stable_prefix_len: int | None = None,
     capture_hidden: bool | None = None,
+    resource_governor: ResourceGovernor | None = None,
 ) -> PromptState:
     """Build the initial prompt state used by MTP-k decode.
 
@@ -4404,6 +4405,7 @@ def restore_or_prefill_prompt_state(
             vision_splice=vision_splice,
             gdn_boundary_sink=gdn_boundary_sink,
             stable_prefix_len=stable_prefix_len,
+            resource_governor=resource_governor,
         )
         prompt_eval_time = target_time
     return _emit_prefill_complete(PromptState(
@@ -5324,6 +5326,7 @@ def _prefill(
     vision_splice: Any | None = None,
     gdn_boundary_sink: list[tuple[int, Any]] | None = None,
     stable_prefix_len: int | None = None,
+    resource_governor: ResourceGovernor | None = None,
 ):
     if not prompt_ids:
         raise ValueError("prompt_ids must not be empty")
@@ -5374,11 +5377,23 @@ def _prefill(
                 _eval_cache_roots(cache)
             else:
                 _eval(prefill)
+            chunk_elapsed = time.perf_counter() - started
             _runtime_count(rt, "prefill_chunks")
-            target_forward_time += time.perf_counter() - started
+            target_forward_time += chunk_elapsed
             target_forward_time += _prefill_chunk_cache_cleanup(rt)
             if capture_boundaries:
                 _capture_gdn_boundary(gdn_boundary_sink, end, cache)
+            if resource_governor is not None:
+                # Pace right after the sync point above (real GPU dispatch —
+                # see docs/resource-governor/IMPLEMENTATION_NOTES.md section
+                # 1 "Sustained/chunked prefill" and section 3) so the yield
+                # creates genuine scheduling headroom rather than delaying
+                # work that hasn't actually reached the GPU yet.
+                resource_governor.after_prefill_chunk(
+                    work_seconds=chunk_elapsed,
+                    tokens=end - start,
+                    abort_check=abort_check,
+                )
             _check_postcommit_abort(abort_check)
         if vision_splice is not None and vision_splice.remaining() > 0:
             raise ValueError(
@@ -6033,6 +6048,7 @@ def generate_ar(
         prefill_callback=prefill_callback,
         abort_check=abort_check,
         capture_hidden=ar_return_hidden,
+        resource_governor=resource_governor,
     )
     prompt_state_total_time_s = time.perf_counter() - _prompt_state_started
     cache = prompt_state.trunk_cache
