@@ -31,34 +31,72 @@ something looks off, try installing with 3.12 or 3.13 instead, since the
 pinned `mlx`/`mlx-lm`/`transformers` versions aren't verified against
 every Python release yet.)
 
-**Option A — quick, `mtplx` CLI only:**
+**Already have official MTPLX installed? Read this first.** The official
+installer (`scripts/install_macos.sh`, and Homebrew's formula does the
+equivalent) does **not** put a plain `mtplx` binary on your `PATH` — it
+creates a dedicated Python environment (`~/.mtplx/venv` for the curl
+installer) and writes a small launcher script to `~/.local/bin/mtplx`
+(and `/opt/homebrew/bin/mtplx` on Apple Silicon) that always runs:
+
+```bash
+exec "$HOME/.mtplx/venv/bin/mtplx" "$@"
+```
+
+That launcher directory is prepended to your shell's `PATH`, so it wins
+over anything else named `mtplx`. **A plain `pip install` elsewhere does
+not update it** — you'll see `mtplx: error: unrecognized arguments:
+--resource-profile interactive` because the shim is still launching the
+old official build, which has no idea this feature exists. Check which
+one you're running before installing:
+
+```bash
+which mtplx
+cat "$(which mtplx)"   # if this is a short shell script, you have the shim
+brew list mtplx        # non-empty output means Homebrew manages your install
+```
+
+Given that, prefer **Option B** below if you're not sure — it sidesteps
+this entirely rather than fighting over the shared `mtplx` name.
+
+**Option A — quick, `mtplx` CLI only, best on a Mac with no existing
+MTPLX install:**
 
 ```bash
 python3 -m pip install "mtplx @ git+https://github.com/digitalgravy/MTPLX.git@feature/resource-governor"
 mtplx doctor
 ```
 
-If you already have official MTPLX installed, this replaces it in
-whatever Python environment you run the command in — use a fresh
-virtualenv (`python3 -m venv .venv && source .venv/bin/activate` first)
-if you want to keep both side by side. This gets you `mtplx serve
---resource-profile ...`, the admin API, and CLI/config support — but
-**not** the `mtplx-qos` companion script (see below).
+If `which mtplx` shows the launcher shim above, this alone won't take
+effect — either install straight into the venv it already points at:
 
-**Option B — full clone, recommended if you want `mtplx-qos` too:**
+```bash
+~/.mtplx/venv/bin/python -m pip install --upgrade "mtplx @ git+https://github.com/digitalgravy/MTPLX.git@feature/resource-governor"
+```
+
+or use Option B's isolated venv instead, and always activate it before
+running the fork's `mtplx`. Either way, Option A alone gets you `mtplx
+serve --resource-profile ...`, the admin API, and CLI/config support —
+but **not** the `mtplx-qos` companion script (see below).
+
+**Option B — an isolated venv, recommended: avoids the shadowing problem
+above entirely, and also gets you `mtplx-qos`:**
 
 ```bash
 git clone https://github.com/digitalgravy/MTPLX.git
 cd MTPLX
 git checkout feature/resource-governor
+python3 -m venv .venv
+source .venv/bin/activate
 python3 -m pip install -e ".[server]"
 mtplx doctor
 ./scripts/mtplx-qos --help
 ```
 
-`git pull` later to pick up updates to this branch. `-e` (editable)
-means you're running straight from the checkout, which is also how you'd
-want it if you ever want to read the code the docs are describing.
+Your official MTPLX install (if any) is untouched. Every time you want
+to use this fork's `mtplx`, `cd` into this clone and `source
+.venv/bin/activate` first (a shell alias like `alias mtplx-gov="source
+~/MTPLX/.venv/bin/activate"` makes this less annoying). `git pull` later
+to pick up updates to this branch.
 
 **Just want `mtplx-qos` after an Option A install?** It's a single
 self-contained script with no dependency on the `mtplx` package — grab
@@ -79,9 +117,14 @@ curl http://127.0.0.1:8000/admin/resource-governor
 
 You should get back JSON with `"profile": "interactive"` — if you get a
 connection error, the server isn't up yet (give it a moment to load the
-model); if you get a 404, you're running vanilla MTPLX, not this fork
-(double check `pip show mtplx` points at the git install above, not a
-PyPI release).
+model); if you get a 404, you're running vanilla MTPLX, not this fork.
+
+**`mtplx: error: unrecognized arguments: --resource-profile interactive`**
+— your `mtplx` isn't this fork's build at all; it's the shim/PATH
+shadowing problem described above. `which mtplx` and `cat` it (or `brew
+list mtplx`) to confirm, then use Option B, or reinstall directly into
+whatever venv the shim already points at (Option A's fallback command
+above).
 
 ## What it actually does today
 
