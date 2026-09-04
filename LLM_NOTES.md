@@ -590,32 +590,71 @@ to `interactive` — not staged, just happened to be true. If a future
 session runs `mtplx-qos auto` and it does something unexpected, check
 `ps aux | grep -i moonlight` before assuming it's a bug.
 
+## Session 1 continued — full documentation suite (same day, explicit user request)
+
+User asked to "round it out" (decode/prefill coverage — done, see above)
+"and then ensure there's documentation for implementing this change, and
+ensure that you also add a plain-speaking version of the documentation
+separately for people who maybe aren't as technically minded." Wrote all
+five docs (`README.md`, `ARCHITECTURE.md`, `PLAIN_LANGUAGE_GUIDE.md`,
+`BENCHMARKS.md`, `UPSTREAM_STATUS.md`) — full detail in
+PROJECT_STATUS.md's "Full documentation suite" entry. Two things worth
+not rediscovering:
+
+- **Caught a factual error before it shipped**: drafted README.md
+  claiming `mtplx serve --config PATH` exists as a flag. It doesn't —
+  only `$MTPLX_CONFIG` env var and the default `~/.mtplx/config.toml`
+  path. Caught by actually running `mtplx serve --help` and grepping for
+  `--config` rather than trusting memory of what "should" exist. Same
+  discipline this whole project has tried to apply to code — apply it to
+  docs too, they're claims that can be wrong just like code.
+- **The plain-language guide is a genuinely different document, not a
+  simplified README**: it explains the five profiles by what a
+  non-technical user would *notice* (games stutter or don't, answers
+  come fast or slow) rather than by duty-cycle numbers, includes the
+  same "not everything is enforced yet" honesty the technical docs have
+  but phrased for that audience, and has its own troubleshooting section
+  aimed at "why is my game still stuttering" rather than "why did my API
+  call fail." If asked to update one of these docs later, don't assume
+  the other one needs the identical update — check whether the change
+  matters to that audience.
+
 ### Unresolved questions / exact next action for a fresh session
 
-Phases 0-4, the MTP decode hook, the AR pipeline lane, all reachable
-prefill functions, and basic admission enforcement are done, tested, and
-pushed. Decode/prefill coverage is complete for every path a real
-`mtplx serve` request can take in AR or MTP mode. If you're picking this
-up cold:
+Phase 0 through Phase 7 are done, tested, pushed, and documented — core
+governor, decode pacing (classic AR, `MTPLX_AR_PIPELINE`, MTP), prefill
+pacing (all reachable functions), runtime admin API, CLI/config
+integration, basic admission enforcement, `mtplx-qos`, and the full
+5-document doc suite plus `IMPLEMENTATION_NOTES.md`. If you're picking
+this up cold:
 
 1. Read `docs/resource-governor/IMPLEMENTATION_NOTES.md` in full and this
    file's session notes above before writing more governor code — all
-   hook-placement decisions, including three corrected mistakes/gaps
+   hook-placement decisions, including several corrected mistakes/gaps
    found along the way (see IMPLEMENTATION_NOTES.md sections 5-6), are
    settled. Don't re-derive them.
-2. Check whether documentation work is done: `docs/resource-governor/README.md`,
-   `ARCHITECTURE.md`, a plain-language non-technical guide, `BENCHMARKS.md`,
-   `UPSTREAM_STATUS.md`, and the `mtplx-qos` companion tool were requested
-   by the user in this session — check PROJECT_STATUS.md's "In progress"
-   to see how far that got before this session ended.
+2. If asked to change user-facing behavior, update the matching doc(s) —
+   there are now five, not just `IMPLEMENTATION_NOTES.md`. Check
+   `PLAIN_LANGUAGE_GUIDE.md` specifically whenever something a
+   non-technical user would notice changes (new profile, changed
+   default, new caveat about what's/isn't enforced).
 3. Remaining scope, roughly in priority order:
-   - Phase 5/6: wire `admission_allowed()` (implemented since Phase 1,
-     still unused) into an actual request-admission check — no live
-     enforcement point exists to hook into yet, this is new wiring.
+   - Deeper Phase 6: memory-pressure-based admission (not just
+     protect/pause refusing outright) — needs the `MemoryPlan`/
+     `AdmissionPolicy` integration IMPLEMENTATION_NOTES.md already
+     flagged as dormant/unwired. Architecturally riskier, deliberately
+     not attempted yet.
    - A3B batched lane (`a3b_mtp_batch.py`) — deferred, narrow, needs the
-     same careful verification as the MTP hook.
+     same careful independent-verification discipline as the MTP hook.
+   - Runtime-verify that mutating `max_active_requests`/`decode_batch_max`
+     live actually changes admission behavior (still just statically
+     inferred, not proven) — needed before README.md's "not yet enforced"
+     caveat can be upgraded to "enforced."
    - Phase 8: M5 Ultra hardware tuning + real Moonlight acceptance test —
-     needs the actual target machine, not this M4 Max dev machine.
+     needs the actual target machine, not this M4 Max dev machine. Once
+     that hardware is available, update `BENCHMARKS.md` with Test A-F and
+     the Moonlight test, and only then treat the profile default numbers
+     as tuned rather than hypotheses.
 4. Keep committing docs as you go, not just at the end of a session
    (brief section 28).
 5. **Check `git status` for a stray file named `1` before every commit**

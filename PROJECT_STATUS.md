@@ -2,24 +2,26 @@
 
 ## Current objective
 
-**Decode and prefill coverage is now complete for every reachable live
-path.** Phases 0-4 (core governor, AR decode pacing, prefill pacing,
-runtime admin API, CLI/config integration), the MTP decode hook, the
-`MTPLX_AR_PIPELINE` lane hook, and all remaining prefill functions are
-done. Confirmed via real-model, live-server testing that a genuinely
-default-configured MTP request (no per-request overrides at all) is now
-paced end-to-end on both prefill and decode — the last gap (prefill
-silently not firing under the real default `mtp_history_policy="committed"`
-+ sustained-profile combination, discovered while validating this batch
-of work) is closed. See `docs/resource-governor/IMPLEMENTATION_NOTES.md`
-section 5-6 and the "Completed" entries below for full technical detail.
+**The v0/v1 feature set is complete and documented.** Every phase through
+Phase 7 (core governor, AR/MTP/pipeline decode pacing, all reachable
+prefill functions, runtime admin API, CLI/config integration, basic
+admission enforcement, the `mtplx-qos` companion tool) is done, tested,
+and validated live against a real downloaded model. Full documentation
+suite is written: `docs/resource-governor/README.md` (technical
+reference), `ARCHITECTURE.md` (design rationale), `PLAIN_LANGUAGE_GUIDE.md`
+(non-technical usage guide, requested explicitly by the user),
+`BENCHMARKS.md` (real measurements + what's still needed),
+`UPSTREAM_STATUS.md` (fork tracking), plus the existing
+`IMPLEMENTATION_NOTES.md` engineering log. What remains is genuinely
+out of reach on this dev machine (Phase 8: M5 Ultra tuning + real
+Moonlight test) or deliberately deferred as architecturally riskier
+(deeper memory-pressure admission, the narrow A3B batched lane).
 
 ## In progress
 
-Writing user-facing documentation (`docs/resource-governor/README.md`,
-`ARCHITECTURE.md`, a plain-language guide, `BENCHMARKS.md` skeleton,
-`UPSTREAM_STATUS.md`), per explicit user request. The `mtplx-qos`
-companion tool (Phase 7) is done — see "Completed" below.
+Nothing — see "Next up" for what's left, all of it either blocked on
+hardware this session doesn't have, or deliberately deferred with
+reasoning recorded below.
 
 ## Next up
 
@@ -543,6 +545,54 @@ companion tool (Phase 7) is done — see "Completed" below.
     incidentally rather than staged. Separately confirmed the `balanced`
     branch and detector-crash handling in isolation (mocked detectors,
     no real Moonlight dependency).
+- [x] **Full documentation suite — done**, per explicit user request to
+  "ensure there's documentation for implementing this change" plus "a
+  plain-speaking version... for people who maybe aren't as technically
+  minded, but want to utilise this system":
+  - `docs/resource-governor/README.md` — technical quick reference:
+    what's actually enforced today vs. reported-but-not-yet (an explicit,
+    important honesty note — profile `max_active_requests`/
+    `decode_batch_max`/`prefill_chunk_tokens` are visible in the stats
+    API but not yet wired to real scheduler behavior, only duty-cycle
+    pacing and protect/pause admission refusal are live), CLI flags,
+    config keys, the admin API with a real captured JSON example,
+    `mtplx-qos` usage, correctness guarantee, known limitations.
+  - `docs/resource-governor/ARCHITECTURE.md` — why Apple Silicon
+    contention happens, why duty cycling over a fixed tok/s cap, why each
+    of the three decode-lane shapes needed a different hook design (with
+    the MTP double-counting bug as the concrete illustration), the
+    MLX-laziness hazard, live profile-switching semantics, the
+    mechanism/policy split.
+  - `docs/resource-governor/PLAIN_LANGUAGE_GUIDE.md` — the explicitly
+    requested non-technical version. No jargon (or jargon explained in
+    one plain sentence where unavoidable), written for someone who owns
+    this Mac and games on it but doesn't write code: what this is (one
+    paragraph, plain analogy), the five profiles explained by what
+    you'd actually notice, step-by-step `mtplx-qos` usage including
+    `auto --watch`, an honest caveat about what's and isn't actually
+    enforced yet (in plain terms, not just the technical doc's version),
+    and simple troubleshooting.
+  - `docs/resource-governor/BENCHMARKS.md` — every real measurement
+    taken this session (AR-mode decode pacing, MTP-mode decode pacing,
+    the full-coverage default-request confirmation with real captured
+    JSON, admission enforcement, `mtplx-qos auto`'s live Moonlight
+    detection), clearly labeled as M4 Max dev-machine numbers, not
+    target-hardware tuning data — plus an explicit, unstarted checklist
+    of brief section 19's Test A-F and section 20's Moonlight acceptance
+    test, none of which are meaningfully runnable on this dev machine.
+  - `docs/resource-governor/UPSTREAM_STATUS.md` — base commit, all 9
+    commits on this branch summarized in order, why the diff is
+    additive-only by construction, three documented deviations from the
+    brief's illustrative sketches (async API, `PUT` vs `POST`, which
+    prefill function is "the" representative one) with reasoning for
+    each, and open questions to resolve before an actual upstream PR
+    (none filed yet — this fork was built speculatively, not from an
+    upstream-solicited RFC).
+  - Verified every internal cross-link between these files resolves to
+    an existing file, and spot-checked factual claims against the actual
+    CLI (`--config` does **not** exist as a flag on `serve`, only
+    `$MTPLX_CONFIG` — caught and fixed before committing) rather than
+    trusting memory of what flags should exist.
 
 ## Blocked / needs investigation
 
