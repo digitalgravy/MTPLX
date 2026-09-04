@@ -14043,3 +14043,58 @@ def test_resource_governor_admin_logs_profile_transition(caplog):
         "resource governor profile: max -> protect" in record.message
         for record in caplog.records
     )
+
+
+# ---- resource governor startup profile resolution -----------------------
+
+
+def test_resolve_resource_governor_profile_defaults_to_max():
+    args = parse_args(["--warmup-tokens", "0"])
+    profile = openai._resolve_resource_governor_profile(args)
+    assert profile.name == "max"
+    assert profile.prefill_duty_cycle == 1.0
+    assert profile.decode_duty_cycle == 1.0
+
+
+def test_resolve_resource_governor_profile_selects_named_profile():
+    args = parse_args(["--warmup-tokens", "0", "--resource-profile", "interactive"])
+    profile = openai._resolve_resource_governor_profile(args)
+    assert profile.name == "interactive"
+    assert profile.decode_duty_cycle == 0.40
+    assert profile.min_decode_tps == 15.0
+
+
+def test_resolve_resource_governor_profile_field_overrides_keep_profile_name():
+    args = parse_args(
+        [
+            "--warmup-tokens",
+            "0",
+            "--resource-profile",
+            "balanced",
+            "--decode-duty-cycle",
+            "0.15",
+        ]
+    )
+    profile = openai._resolve_resource_governor_profile(args)
+    # Name stays "balanced" (so the admin API still reports it as such) even
+    # though one field was explicitly overridden away from that profile's
+    # own default (brief section 11: explicit values override profile
+    # defaults without inventing a fake "custom" profile identity).
+    assert profile.name == "balanced"
+    assert profile.decode_duty_cycle == 0.15
+    assert profile.prefill_duty_cycle == 0.70  # balanced's own default, untouched
+
+
+def test_resolve_resource_governor_profile_rejects_bad_config_value():
+    args = parse_args(["--warmup-tokens", "0"])
+    args.resource_profile = "not-a-real-profile"  # simulates a stale config.toml value
+    with pytest.raises(ValueError, match="not-a-real-profile"):
+        openai._resolve_resource_governor_profile(args)
+
+
+def test_resolve_resource_governor_profile_invalid_duty_cycle_override_raises():
+    args = parse_args(
+        ["--warmup-tokens", "0", "--decode-duty-cycle", "1.5"]  # out of (0, 1.0]
+    )
+    with pytest.raises(ValueError):
+        openai._resolve_resource_governor_profile(args)

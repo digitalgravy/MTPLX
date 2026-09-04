@@ -2,55 +2,56 @@
 
 ## Current objective
 
-Phase 4 — CLI and persisted config for resource-governor profiles
-(`--resource-profile`, `--prefill-duty-cycle`, `--decode-duty-cycle`,
-`--min-decode-tps`), plus effective-value reporting. Phases 0-3 are done
-— see `docs/resource-governor/IMPLEMENTATION_NOTES.md`. See
-`MTPLX_RESOURCE_GOVERNOR_CODEX_BRIEF.md` for the full spec.
+**Hook the MTP decode path (`generate_mtpk`).** Phases 0-4 are done —
+core governor, decode pacing (AR lane), prefill pacing, runtime admin
+API, CLI/config integration. Real-model validation (2026-09-04, disk
+space now healthy — 143GB free, was a transient/external issue, not this
+project's fault) proved the mechanism works correctly end-to-end
+(natural ~95 tok/s decode dropped to ~38 tok/s delivered at
+`interactive`'s 0.4 duty cycle on a real Qwen3.5-4B model) — **but also
+revealed a critical scope gap**: this test model's default
+`generation_mode` is `"mtp"`, not `"ar"`, and the governor currently only
+hooks the AR path. On a real server with default settings, **the
+governor does nothing at all** unless a caller explicitly requests
+`generation_mode: "ar"`. Since MTP is MTPLX's flagship/default mode for
+MTP-capable models, this is the most important remaining piece for the
+project's real-world usefulness — bigger priority than anything else
+left on the list. See `docs/resource-governor/IMPLEMENTATION_NOTES.md`
+and `MTPLX_RESOURCE_GOVERNOR_CODEX_BRIEF.md` for full context.
 
 ## In progress
 
-- [ ] Real inference smoke test — blocked on disk space. Pulling
-      `Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed` (chosen over the 27B
-      default because this dev machine is a 36GB M4 Max, not the 96GB M5
-      Ultra target) failed at 49% with "not enough disk space"; the partial
-      download (1.2GB) was removed. Needs several more GB free before
-      retrying — see "Blocked / needs investigation" below.
+- [ ] Investigating `generate_mtpk` (`generation.py:7312`, ~5,300 lines)
+      to hook `after_decode_step` into its draft+verify+commit cycle. Not
+      yet started at time of writing this status — see brief section 30
+      Q6/Q7 (cycle boundary, whether draft-forward time should count as
+      governed "work") in IMPLEMENTATION_NOTES.md, both flagged there as
+      genuinely unresolved and needing a closer read before hooking.
 
 ## Next up
 
-- [ ] Retry the small-model pull and run `mtplx run "hello" --model
-      Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed` (or `mtplx chat`) once
-      disk space allows, to close out the Phase 0 "run an existing
-      inference workload" checklist item and give the (still-unread)
-      reconnaissance follow-ups (`request_policy.py`, `cache_state.py`,
-      `session_bank.py`, `kpi/runtime_kpis.py`) empirical grounding.
-- [ ] Runtime-verify (not just statically infer) that mutating
-      `state.args.max_active_requests`/`decode_batch_max` live actually
-      changes admission behavior on a running server — these two keys are
-      *not* currently in `DASHBOARD_MUTABLE_SETTINGS_KEYS`
-      (`openai.py:15137-15155`), unlike `prefill_chunk_tokens`.
-- [ ] Validate the decode governor hook against a real downloaded model
-      once disk space allows (currently only validated against a toy MLX
-      model — see "Completed" below).
-- [ ] Hook `after_decode_step` into the `MTPLX_AR_PIPELINE` lane and the
-      MTP (`generate_mtpk`) / batched (`batched_decode.py`) decode paths
-      (Phase 1 only covers the classic/default AR loop).
-- [ ] Hook `after_prefill_chunk` into MTPLX's other four chunked-prefill
+- [ ] After `generate_mtpk` is hooked: hook `after_decode_step` into the
+      `MTPLX_AR_PIPELINE` lane and batched decode (`batched_decode.py`)
+      too — full decode coverage.
+- [ ] Hook `after_prefill_chunk` into MTPLX's other three chunked-prefill
       implementations — `_prefill_restored_prompt_suffix`
       (`generation.py:2548`, warm-restore suffix), `_prefill_with_hidden_sequence`
       (`generation.py:5656`, MTP-hidden-sequence path, one caller),
       `_prefill_committed_mtp_history_streaming` (`generation.py:5414`,
       committed/last_window MTP history policy) — Phase 2 only covers
-      plain `_prefill()` (`generation.py:5317+`), the one `generate_ar`'s
-      default `mtp_history_policy="cycle"` cold-start path actually uses
-      (also shared by `generate_mtp1`/`generate_mtpa`, not `generate_mtpk`).
-- [ ] Phase 4: CLI (`--resource-profile`, `--prefill-duty-cycle`,
-      `--decode-duty-cycle`, `--min-decode-tps`) + persisted config +
-      effective-value reporting/logging at startup.
-- [ ] Runtime-verify the admin API against a real running `mtplx serve`
-      process (so far only exercised via FastAPI `TestClient` against a
-      fake/toy `ServerState`, not a live server process).
+      plain `_prefill()`.
+- [ ] Runtime-verify (not just statically infer) that mutating
+      `state.args.max_active_requests`/`decode_batch_max` live actually
+      changes admission behavior on a running server — these two keys are
+      *not* currently in `DASHBOARD_MUTABLE_SETTINGS_KEYS`
+      (`openai.py:15137-15155`), unlike `prefill_chunk_tokens`.
+- [ ] Phase 5/6: wire `admission_allowed()` (implemented since Phase 1,
+      unused so far) into an actual request-admission check — recon found
+      there's no live admission enforcement to hook into today, so this
+      is new wiring, not a hook into something existing.
+- [ ] Phase 7: `mtplx-qos` companion CLI tool.
+- [ ] Phase 8: M5 Ultra hardware tuning + real Moonlight acceptance test
+      — needs the actual target machine, not this M4 Max dev machine.
 
 ## Completed
 
@@ -255,12 +256,100 @@ Phase 4 — CLI and persisted config for resource-governor profiles
     pre-existing failure categories appeared (low-disk SSD guard,
     numerical precision in `test_graphbank_compiled_verify.py`); nothing
     new broke.
-  - **Not yet done**: exercising the admin API against an actual running
-    `mtplx serve` process end-to-end (only `TestClient` against a
-    fake/toy state so far); CLI/config-driven profile selection at
-    startup is explicitly Phase 4, not done here — right now the *only*
-    way to change the profile is the new HTTP API, and it always starts
-    at `max` on every server start.
+  - **Not yet done at commit time**: exercising the admin API against an
+    actual running `mtplx serve` process end-to-end (only `TestClient`
+    against a fake/toy state so far); CLI/config-driven profile selection
+    at startup was Phase 4, not this phase. **Both since done** — see the
+    Phase 4 and real-model-validation entries below.
+- [x] Phase 4 — CLI and persisted config integration:
+  - New flags on `_add_batching_args` (`cli.py:703+`, covers `start`,
+    `quickstart`, `serve` subcommands) and duplicated on the standalone
+    server parser (`server/openai.py:parse_args`, which independently
+    redefines `--max-active-requests`/etc. rather than sharing `cli.py`'s
+    parser — matched that existing duplication for consistency):
+    `--resource-profile {max,balanced,interactive,protect,pause}`,
+    `--prefill-duty-cycle`, `--decode-duty-cycle`, `--min-decode-tps`.
+  - New `config.py` keys (`resource_profile`, `prefill_duty_cycle`,
+    `decode_duty_cycle`, `min_decode_tps`) added to `CONFIG_VALUE_KEYS`,
+    `UserConfig`, `load_user_config`'s TOML parsing, and
+    `_RUNTIME_DEFAULTS` — this last one is the existing generic
+    CLI-explicit-beats-config precedence mechanism
+    (`config.py:_apply_runtime_defaults`), so no new precedence logic was
+    needed, just registering the new keys in it.
+  - New `_resolve_resource_governor_profile(args)` helper
+    (`server/openai.py`, right before `class ServerState`): resolves
+    `--resource-profile` (default `max`) via `resolve_profile()` (raises
+    a clean `ValueError` on a bad/stale config value rather than a raw
+    `KeyError`), then applies any explicit
+    `--prefill-duty-cycle`/`--decode-duty-cycle`/`--min-decode-tps`
+    overrides on top via `dataclasses.replace` — the result keeps the
+    base profile's *name* (so `GET /admin/resource-governor` still
+    reports e.g. `"interactive"` even with one field tweaked), matching
+    brief section 11's "explicit values override profile defaults"
+    without inventing a fake "custom" profile identity.
+    `ServerState.__init__` now calls this instead of always constructing
+    a bare `ResourceGovernor()`, and logs the effective values at startup
+    (`LOGGER.info`, one line, brief section 11's "effective configuration
+    must be logged at startup").
+  - Tests: 3 new `tests/test_config.py` tests (TOML round-trip +
+    CLI-beats-config precedence) and 5 new `tests/test_server_openai.py`
+    tests directly unit-testing `_resolve_resource_governor_profile` as a
+    pure function (default max, named-profile selection, field-override-
+    keeps-name, bad-config-value rejection, bad-override-value
+    rejection) — chose this over constructing a real `ServerState`
+    because that requires heavy model-load mocking already used
+    elsewhere in the file for unrelated purposes; the resolution logic
+    itself needs only `args` in and a `ResourceProfile` out.
+  - Ran the new tests plus `test_config.py`/`test_config_profile_precedence.py`
+    /`test_public_cli.py`/`test_no_mlx_imports.py` full files, the full
+    `test_server_openai.py` (370 tests), and a 15-file batch covering
+    everything else touching `cli.py`/`config.py` — all clean, no
+    failures at all in this batch (not even the usual pre-existing ones,
+    since disk space was healthy for this run — see below).
+- [x] **Disk space was fixed by the user** (2026-09-04): jumped from
+  723MB to 143GB free between two checks. The earlier chronic low-disk
+  condition (documented extensively above and in LLM_NOTES.md) was
+  external to this project and is now resolved. Retried and completed
+  the `Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed` download (2.6GB) that
+  had been blocked since Phase 0.
+- [x] **Real-model validation, end-to-end, via a live `mtplx serve`
+  process** (not `TestClient`, an actual server subprocess + `curl`):
+  - `mtplx run` sanity check: the model generates correctly, ~93 tok/s
+    baseline via MTP depth 3.
+  - Started `mtplx serve --model Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed`,
+    confirmed `GET /admin/resource-governor` starts at `max` with zero
+    steps recorded, sent a `POST /v1/chat/completions` request (150
+    tokens) at `max` (~1.2s), then `POST /admin/resource-governor/profile
+    {"profile": "interactive"}` **live, no restart**, then the same
+    request again.
+  - **First attempt showed zero governor activity** (`"steps": 0` on both
+    lanes) despite the profile switch succeeding — see the critical
+    finding below; this was because the request used the model's default
+    `generation_mode: "mtp"`, which isn't hooked.
+  - Re-ran with `"generation_mode": "ar"` explicit in the request body:
+    governor fired correctly — prefill: 1 step, `effective_duty_cycle`
+    exactly `0.4` as configured, one ~122ms yield; decode: 29 steps,
+    `effective_duty_cycle` exactly `0.4`, `natural_tps_ema` ≈95.3 tok/s
+    (this model's real unthrottled decode speed on this M4 Max),
+    `delivered_tps_ema` ≈38.1 tok/s (95.3 × 0.4 ≈ 38.1 — matches the
+    formula almost exactly), 29 yields totaling ≈459ms. `min_decode_tps`
+    floor (15.0) correctly did not engage since 38.1 > 15.
+  - **This is real proof the core duty-cycle mechanism works correctly
+    on genuine MLX inference against a real downloaded model** — not a
+    toy model, not a mock. Satisfies brief section 25's "at least one
+    real MLX inference workload must validate each prefill/decode hook"
+    for the AR decode and plain-`_prefill` prefill hooks specifically.
+  - **Critical finding, see "Current objective" above**: this model's
+    *default* `generation_mode` is `"mtp"`. On a real server with no
+    per-request override, **the governor currently does nothing at all**,
+    because Phase 1/2/3 only wired `resource_governor` into the
+    `generate_ar` call path in `_run_generation`, not the `generate_mtpk`
+    (else) branch. This was known/documented as an explicit scope cut
+    since Phase 1 ("classic AR lane only"), but its *practical
+    significance* — that it means the governor is inert on most real
+    default-configured MTPLX servers — only became concrete once tested
+    against a real MTP-capable model's actual default behavior. Promoted
+    to top priority.
 
 ## Blocked / needs investigation
 
@@ -268,12 +357,11 @@ Phase 4 — CLI and persisted config for resource-governor profiles
       generally any 96GB-scale memory-pressure testing) cannot happen on
       this dev machine (M4 Max, 36GB) — needs the actual target M5 Ultra
       Mac Studio.
-- [ ] This dev machine's disk is chronically near-full (was down to 117MB
-      free at one point this session, unrelated to this project). MTPLX
-      itself disables SSD-tier features below 10GiB free, and model
-      downloads need several GB of headroom. The real-inference smoke test
-      is on hold until more space exists; not something to try to fix
-      unilaterally (see LLM_NOTES.md).
+- [x] This dev machine's disk was chronically near-full for most of this
+      session (down to 117MB free at one point), unrelated to this
+      project — user fixed it 2026-09-04 (now 143GB free). If it recurs,
+      don't try to fix it unilaterally; ask (see LLM_NOTES.md for what
+      happened when this wasn't handled carefully the first time).
 - [x] Whether MTPLX already has a reusable thermal/profile abstraction —
       answered: `mtplx/thermal.py`/`fan_mode.py` are a good *pattern*
       precedent (CLI verb + status + HTTP mirror) but operate on a

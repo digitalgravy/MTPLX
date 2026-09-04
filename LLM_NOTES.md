@@ -438,50 +438,100 @@ not to rediscover:
   into something existing. That's Phase 5/6 territory per the brief's own
   phasing, not done in Phase 3.
 
+## Session 1 continued — Phase 4 + real-model validation (same day, 2026-09-04)
+
+Disk space, which had been chronically blocking real-model work all
+session, got fixed by the user (723MB → 143GB free, external fix, not
+something I did). Used the headroom to: finish Phase 4 (CLI + config
+integration — straightforward, followed `config.py`'s existing generic
+`_RUNTIME_DEFAULTS` precedence mechanism exactly, no new logic needed),
+retry and complete the `Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed`
+download, and — for the first time this project — actually run the
+governor against a real downloaded model through a real `mtplx serve`
+process (not `TestClient`, not a toy model).
+
+**The real-model test was extremely valuable and surfaced something
+important.** Full detail in PROJECT_STATUS.md's "Real-model validation"
+completed entry; the short version:
+
+- The mechanism itself works exactly as designed: switched
+  `max → interactive` live via the admin API with a real server running,
+  no restart, and with `generation_mode: "ar"` explicit in the request,
+  decode went from a natural ~95.3 tok/s to ~38.1 tok/s delivered — right
+  at the 0.4 duty cycle target (95.3 × 0.4 ≈ 38.1). Prefill paced
+  correctly too (`effective_duty_cycle: 0.4` exactly).
+- **But the very first attempt, without an explicit `generation_mode`,
+  showed ZERO governor activity** — `"steps": 0` on both lanes, despite
+  the profile switch reporting success. Root cause: this model (like
+  most real MTPLX-served models) defaults to `generation_mode: "mtp"`,
+  and `_run_generation` in `server/openai.py` only passes
+  `resource_governor=state.resource_governor` into the `generate_ar(...)`
+  branch — the `else` branch (`generate_mtpk(...)`, MTP path) doesn't get
+  it at all.
+- This was always a *documented* scope cut (Phase 1 said "classic AR
+  lane only" from the start), but until this test I hadn't internalized
+  what it actually *means* in practice: **on a real MTPLX server running
+  its own default configuration, the governor currently does nothing.**
+  MTP is the product's flagship mode. This isn't a nice-to-have follow-up
+  anymore — it's the thing standing between "the governor works in tests"
+  and "the governor does anything useful on the actual target machine."
+  Promoted to top priority in PROJECT_STATUS.md.
+
 ### Unresolved questions / exact next action for a fresh session
 
-Phase 0 done; Phase 1 (decode, classic AR lane) done; Phase 2 (prefill,
-plain `_prefill()` only) done; Phase 3 (runtime admin API + live
-switching) done — all committed and pushed. If you're picking this up
+Phases 0-4 done and committed/pushed (core governor, decode pacing on
+the AR lane, prefill pacing on plain `_prefill`, runtime admin API,
+CLI/config integration). Real-model validation done for the AR path.
+**The MTP decode path (`generate_mtpk`) is not hooked — this is the
+current top priority**, not a nice-to-have. If you're picking this up
 cold:
 
 1. Read `docs/resource-governor/IMPLEMENTATION_NOTES.md` (including its
-   Phase 2 correction note) and this file's Phase 1/2/3 sections above
-   before writing more governor code — the reconnaissance, the
-   async-vs-sync API decision, the `_prefill` vs
-   `_prefill_with_hidden_sequence` hook-placement choice, and the
-   POST-not-PUT admin route decision are all already settled; don't
-   re-derive them.
-2. Check current disk space (`df -h /`). If there's now >5-10GB free,
-   retry `mtplx pull Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed` then
-   `mtplx serve --model Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed`, hit
-   `POST /admin/resource-governor/profile {"profile": "interactive"}`
-   against the real running server, and confirm decode/prefill actually
-   slow down — the real-model validation every phase so far has been
-   missing. If disk is still tight, ask the user rather than guessing.
-3. Pick the next concrete slice rather than a big bundled patch (brief
-   section 26 discipline: small, testable, separately-committed changes).
-   Reasonable next options, roughly in ascending order of difficulty:
-   - Phase 4: CLI + persisted config (`--resource-profile`,
-     `--prefill-duty-cycle`, `--decode-duty-cycle`, `--min-decode-tps`),
-     so a server can start on a non-`max` profile instead of always
-     needing a runtime API call after startup. `cli.py`'s
-     `_add_batching_args()` (`cli.py:703-740`, per IMPLEMENTATION_NOTES.md
-     section 1) is the natural place for the new flags;
-     `config.py:_apply_profile_default()`-style precedence
-     (`config.py:258-266`) is the natural place for config-file
-     resolution. Log effective values at startup per brief section 11.
-   - Hook `after_decode_step` into the `MTPLX_AR_PIPELINE` lane
-     (`generation.py`, the `_lane_step`/`while True:` block — re-find the
-     exact line, code has moved since Phase 1's notes; the real sync
-     point there is `tok_lazy.item()`).
-   - Hook `after_prefill_chunk` into the remaining three prefill
-     functions (restored-suffix `:2548`, committed-history-streaming
-     `:5414`, hidden-sequence `:5656`) — same pattern as `_prefill`,
-     smaller individual diffs.
-   - MTP (`generate_mtpk`) and batched decode hooks are bigger lifts
-     (larger functions, less-traced sync boundaries per
-     IMPLEMENTATION_NOTES.md Q6/Q7) — save for later.
+   Phase 2 correction note), this file's Phase 1-4 sections above, and
+   PROJECT_STATUS.md's "Real-model validation" entry before writing more
+   governor code — all prior design decisions are settled; the MTP gap
+   is the one open, urgent item.
+2. Go hook `generate_mtpk` (`generation.py:7312`, ~5,300 lines). This is
+   a bigger, more careful task than any hook so far:
+   - Read IMPLEMENTATION_NOTES.md section 2, Q6 and Q7 first — they're
+     explicitly flagged as unresolved from Phase 0 recon: what exactly
+     is "one decode step" in MTP (a draft+verify+commit cycle, producing
+     1..depth tokens, not exactly 1), and whether governed "work time"
+     should include draft-forward time or only target-verify time. Don't
+     guess; read a complete cycle in the actual current code first
+     (`MTPLX_EVAL_AUDIT` — see the gotcha note above — is a good empirical
+     tool for finding the real sync boundaries if static reading isn't
+     conclusive).
+   - Given the function's size, consider fork-ing out the "trace one
+     complete verify cycle and identify the exact hook point" research
+     step rather than reading all 5,300 lines directly into your own
+     context — but write the actual hook code yourself once the boundary
+     is clear, same as every other hook so far.
+   - Mirror the existing pattern exactly: new optional
+     `resource_governor` parameter (default `None`), call
+     `after_decode_step(work_seconds=..., produced_tokens=<tokens this
+     cycle accepted, not always 1>, abort_check=abort_check)` right after
+     whatever the real sync point turns out to be, thread it from
+     `_run_generation`'s `generate_mtpk(...)` call
+     (`server/openai.py`, the `else` branch next to the `generate_ar`
+     branch that already gets it).
+   - **Validate against the real downloaded model again** (it's still on
+     disk: `Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed`), the same way
+     this session did for AR: `mtplx serve`, switch profiles live via the
+     admin API, send a request with the model's *default* generation
+     mode (don't force `generation_mode: "ar"` this time — that's the
+     whole point), confirm `GET /admin/resource-governor`'s `decode`
+     lane shows nonzero steps/yields and a sane `effective_duty_cycle`.
+   - Also confirm deterministic output is unaffected (brief section 18)
+     — same token stream at duty=1.0 governed vs. ungoverned, same as
+     every prior hook's tests did.
+3. After MTP decode is hooked, remaining work in rough priority order:
+   `MTPLX_AR_PIPELINE` lane, batched decode, the other three prefill
+   functions (restored-suffix `:2548`, committed-history-streaming
+   `:5414`, hidden-sequence `:5656`), then Phase 5/6 (admission
+   enforcement — recon found there's genuinely nothing live to hook into,
+   this is new wiring) and Phase 7 (`mtplx-qos` companion). Phase 8 (M5
+   Ultra tuning + Moonlight test) needs the actual target hardware.
 4. Keep committing docs (`PROJECT_STATUS.md`/`LLM_NOTES.md`) as you go,
    not just at the end of a session — brief section 28 is explicit about
    this ("Do not wait until the end of a session").

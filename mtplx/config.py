@@ -37,6 +37,10 @@ CONFIG_VALUE_KEYS = (
     "batch_wait_ms",
     "prefill_chunk_tokens",
     "experimental_mtp_cohorts",
+    "resource_profile",
+    "prefill_duty_cycle",
+    "decode_duty_cycle",
+    "min_decode_tps",
     "ssd_session_cache",
     "ssd_session_cache_dir",
     "ssd_session_cache_max_size",
@@ -77,6 +81,10 @@ class UserConfig:
     batch_wait_ms: float | None = None
     prefill_chunk_tokens: int | None = None
     experimental_mtp_cohorts: bool | None = None
+    resource_profile: str | None = None
+    prefill_duty_cycle: float | None = None
+    decode_duty_cycle: float | None = None
+    min_decode_tps: float | None = None
     ssd_session_cache: str | None = None
     ssd_session_cache_dir: str | None = None
     ssd_session_cache_max_size: str | None = None
@@ -181,6 +189,10 @@ def load_user_config(path: str | Path | None = None) -> UserConfig:
         batch_wait_ms=_float_or_none(data.get("batch_wait_ms")),
         prefill_chunk_tokens=_int_or_none(data.get("prefill_chunk_tokens")),
         experimental_mtp_cohorts=_bool_or_none(data.get("experimental_mtp_cohorts")),
+        resource_profile=_str_or_none(data.get("resource_profile")),
+        prefill_duty_cycle=_float_or_none(data.get("prefill_duty_cycle")),
+        decode_duty_cycle=_float_or_none(data.get("decode_duty_cycle")),
+        min_decode_tps=_float_or_none(data.get("min_decode_tps")),
         ssd_session_cache=_str_or_none(data.get("ssd_session_cache")),
         ssd_session_cache_dir=_str_or_none(data.get("ssd_session_cache_dir")),
         ssd_session_cache_max_size=_str_or_none(data.get("ssd_session_cache_max_size")),
@@ -289,6 +301,10 @@ _RUNTIME_DEFAULTS: dict[str, tuple[str, tuple[str, ...]]] = {
     "batch_wait_ms": ("batch_wait_ms", ("batch-wait-ms",)),
     "prefill_chunk_tokens": ("prefill_chunk_tokens", ("prefill-chunk-tokens",)),
     "experimental_mtp_cohorts": ("experimental_mtp_cohorts", ("experimental-mtp-cohorts",)),
+    "resource_profile": ("resource_profile", ("resource-profile",)),
+    "prefill_duty_cycle": ("prefill_duty_cycle", ("prefill-duty-cycle",)),
+    "decode_duty_cycle": ("decode_duty_cycle", ("decode-duty-cycle",)),
+    "min_decode_tps": ("min_decode_tps", ("min-decode-tps",)),
     "embedding_models": ("embedding_model", ("embedding-model",)),
     "reranker_models": ("reranker_model", ("reranker-model",)),
     "retrieval_max_resident": ("retrieval_max_resident", ("retrieval-max-resident",)),

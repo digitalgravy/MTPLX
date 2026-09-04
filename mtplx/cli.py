@@ -15,6 +15,7 @@ from .batching.state import SchedulerMode
 from .constants import DEFAULT_RUNTIME_MODEL_DIR
 from .fan_mode import FAN_MODE_CHOICES
 from .mtp_batch_numerics import MTP_BATCH_NUMERICS_CHOICES
+from .resource_governor import BUILTIN_PROFILES
 from .profiles import (
     DEFAULT_HF_MODEL_ID,
     DEFAULT_MODEL_ID,
@@ -737,6 +738,48 @@ def _add_batching_args(parser: argparse.ArgumentParser) -> None:
         "--experimental-mtp-cohorts",
         action="store_true",
         help="Expose experimental batched-MTP cohort metadata; disabled by default.",
+    )
+    parser.add_argument(
+        "--resource-profile",
+        choices=sorted(BUILTIN_PROFILES),
+        default=None,
+        help=(
+            "Resource governor QoS profile at startup (see "
+            "docs/resource-governor/). max: no intentional pacing "
+            "(default). balanced/interactive: cooperative duty-cycle "
+            "pacing that yields scheduling headroom for other work on the "
+            "same Mac. protect/pause: stop admitting new work. Can also "
+            "be changed live without a restart via "
+            "POST /admin/resource-governor/profile."
+        ),
+    )
+    parser.add_argument(
+        "--prefill-duty-cycle",
+        type=float,
+        default=None,
+        help=(
+            "Override the selected resource profile's prefill duty cycle "
+            "(0 < x <= 1.0; 1.0 = no intentional pacing)."
+        ),
+    )
+    parser.add_argument(
+        "--decode-duty-cycle",
+        type=float,
+        default=None,
+        help=(
+            "Override the selected resource profile's decode duty cycle "
+            "(0 < x <= 1.0; 1.0 = no intentional pacing)."
+        ),
+    )
+    parser.add_argument(
+        "--min-decode-tps",
+        type=float,
+        default=None,
+        help=(
+            "Override the selected resource profile's minimum useful "
+            "decode tok/s floor (never throttle an already-slow model "
+            "below this). 0 disables the floor."
+        ),
     )
 
 

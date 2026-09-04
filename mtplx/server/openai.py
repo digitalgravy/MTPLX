@@ -154,7 +154,12 @@ from mtplx.fan_mode import (
     FAN_MODE_SMART,
     normalize_fan_mode,
 )
-from mtplx.resource_governor import BUILTIN_PROFILES, ResourceGovernor
+from mtplx.resource_governor import (
+    BUILTIN_PROFILES,
+    ResourceGovernor,
+    ResourceProfile,
+    resolve_profile as resolve_resource_profile,
+)
 from mtplx.reasoning_codecs import (
     QWEN_STYLE_REASONING_BLOCK_RE,
     QWEN_STYLE_REASONING_CLOSE_RE,
@@ -2242,6 +2247,39 @@ def _coerce_family_verify_strategy(args: argparse.Namespace) -> None:
         args.verify_strategy = "batched"
 
 
+def _resolve_resource_governor_profile(args: argparse.Namespace) -> ResourceProfile:
+    """Resolve the startup QoS profile from CLI/config (brief section 11:
+    explicit CLI/config values override the named profile's own defaults).
+
+    ``--resource-profile`` (default "max" — no intentional pacing) selects
+    a built-in profile; ``--prefill-duty-cycle``/``--decode-duty-cycle``/
+    ``--min-decode-tps`` override individual fields on top of it while
+    keeping its name (so ``GET /admin/resource-governor`` still reports
+    e.g. "interactive" even with a tweaked duty cycle). Raises ValueError
+    on an invalid duty-cycle override, mirroring how ServerState already
+    turns other bad startup args into a clean failure
+    (paged_kv_quantization above).
+    """
+    base_name = getattr(args, "resource_profile", None) or "max"
+    # Argparse's `choices=` only validates CLI-supplied values; a stale/typo'd
+    # resource_profile from config.toml reaches here unvalidated, so resolve
+    # (not index) it for a clean ValueError instead of a raw KeyError.
+    base = resolve_resource_profile(base_name)
+    overrides: dict[str, float] = {}
+    prefill_duty_cycle = getattr(args, "prefill_duty_cycle", None)
+    decode_duty_cycle = getattr(args, "decode_duty_cycle", None)
+    min_decode_tps = getattr(args, "min_decode_tps", None)
+    if prefill_duty_cycle is not None:
+        overrides["prefill_duty_cycle"] = prefill_duty_cycle
+    if decode_duty_cycle is not None:
+        overrides["decode_duty_cycle"] = decode_duty_cycle
+    if min_decode_tps is not None:
+        overrides["min_decode_tps"] = min_decode_tps
+    if not overrides:
+        return base
+    return replace(base, **overrides)
+
+
 class ServerState:
     def __init__(self, args: argparse.Namespace) -> None:
         _coerce_family_verify_strategy(args)
@@ -2306,10 +2344,20 @@ class ServerState:
             else None
         )
         self.rate_limiter = _RateLimiter(args.rate_limit)
-        # Defaults to the "max" profile (duty cycle 1.0 both lanes): zero
-        # intentional pacing until an operator explicitly switches profiles
-        # via the /admin/resource-governor API. See docs/resource-governor/.
-        self.resource_governor = ResourceGovernor()
+        # Defaults to the "max" profile (duty cycle 1.0 both lanes) unless
+        # --resource-profile/config selected another one at startup; zero
+        # intentional pacing until then. Can also be switched live afterward
+        # via POST /admin/resource-governor/profile. See docs/resource-governor/.
+        resource_governor_profile = _resolve_resource_governor_profile(args)
+        self.resource_governor = ResourceGovernor(profile=resource_governor_profile)
+        LOGGER.info(
+            "resource governor: profile=%s prefill_duty_cycle=%.3f "
+            "decode_duty_cycle=%.3f min_decode_tps=%s (source: startup)",
+            resource_governor_profile.name,
+            resource_governor_profile.prefill_duty_cycle,
+            resource_governor_profile.decode_duty_cycle,
+            resource_governor_profile.min_decode_tps,
+        )
         startup_backend = descriptor_for_backend_id(getattr(args, "backend_id", None))
         minimum_resident_bytes = None
         resident_floor_label = "The model"
@@ -34144,6 +34192,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Expose future batched-MTP verify cohorts as experimental; off by default.",
     )
+    parser.add_argument(
+        "--resource-profile",
+        choices=sorted(BUILTIN_PROFILES),
+        default=None,
+        help="Resource governor QoS profile at startup; see docs/resource-governor/.",
+    )
+    parser.add_argument("--prefill-duty-cycle", type=float, default=None)
+    parser.add_argument("--decode-duty-cycle", type=float, default=None)
+    parser.add_argument("--min-decode-tps", type=float, default=None)
     parser.add_argument(
         "--ssd-session-cache",
         choices=["off", "on", "write-only"],

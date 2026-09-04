@@ -307,3 +307,80 @@ def test_malformed_config_value_degrades_to_default(tmp_path, capsys):
     warning = capsys.readouterr().err
     assert str(config) in warning
     assert "paged_kv_quantization" in warning
+
+
+# ---- resource governor config keys (docs/resource-governor/) -----------
+
+
+def test_load_user_config_reads_resource_governor_keys(tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        'resource_profile = "interactive"\n'
+        'prefill_duty_cycle = 0.5\n'
+        'decode_duty_cycle = 0.4\n'
+        'min_decode_tps = 12\n',
+        encoding="utf-8",
+    )
+
+    loaded = load_user_config(config)
+
+    assert loaded.exists is True
+    assert loaded.resource_profile == "interactive"
+    assert loaded.prefill_duty_cycle == 0.5
+    assert loaded.decode_duty_cycle == 0.4
+    assert loaded.min_decode_tps == 12.0
+
+
+def test_apply_user_config_fills_resource_governor_defaults(tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        'resource_profile = "balanced"\n'
+        'prefill_duty_cycle = 0.6\n'
+        'decode_duty_cycle = 0.55\n'
+        'min_decode_tps = 10\n',
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        command="serve",
+        model=str(DEFAULT_RUNTIME_MODEL_DIR),
+        cache_dir=None,
+        profile=DEFAULT_PROFILE_NAME,
+        resource_profile=None,
+        prefill_duty_cycle=None,
+        decode_duty_cycle=None,
+        min_decode_tps=None,
+        _cli_flags=set(),
+    )
+
+    apply_user_config(args, config_path=config)
+
+    assert args.resource_profile == "balanced"
+    assert args.prefill_duty_cycle == 0.6
+    assert args.decode_duty_cycle == 0.55
+    assert args.min_decode_tps == 10.0
+
+
+def test_apply_user_config_preserves_explicit_resource_governor_flags(tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        'resource_profile = "balanced"\n'
+        'decode_duty_cycle = 0.55\n',
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        command="serve",
+        model=str(DEFAULT_RUNTIME_MODEL_DIR),
+        cache_dir=None,
+        profile=DEFAULT_PROFILE_NAME,
+        resource_profile="interactive",
+        prefill_duty_cycle=None,
+        decode_duty_cycle=0.9,
+        min_decode_tps=None,
+        _cli_flags={"resource-profile", "decode-duty-cycle"},
+    )
+
+    apply_user_config(args, config_path=config)
+
+    # Explicit CLI flags win even though the config file has values.
+    assert args.resource_profile == "interactive"
+    assert args.decode_duty_cycle == 0.9
