@@ -8,6 +8,20 @@ If you're comfortable with command lines, config files, and APIs, you
 probably want [`README.md`](README.md) instead — it's shorter and more
 precise. This page says the same things, just slower and friendlier.
 
+## Don't have this on your Mac yet?
+
+This feature is brand new and isn't part of the official MTPLX download
+yet — so if you just installed MTPLX from its website or the App Store
+version, you won't have it. It currently only lives in a specific,
+separate copy of the project on GitHub.
+
+Getting it installed involves running a couple of commands in Terminal,
+which is a step better handled by whoever's comfortable doing that for
+you (a tech-inclined friend, or the person who sent you here). Point
+them at [`README.md`'s "Install" section](README.md#install) — it has
+exact copy-paste commands. Once it's installed, everything below this
+line is genuinely yours to drive without any more help.
+
 ## What is this, in one paragraph
 
 This Mac can do two jobs at once: run an AI language model that answers

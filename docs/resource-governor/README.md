@@ -5,12 +5,83 @@ scheduling so a shared Apple Silicon Mac stays responsive for other work
 (gaming over Moonlight, other apps, a human at the keyboard) while MTPLX
 keeps serving. Built for a Mac Studio that's simultaneously an always-on
 LAN LLM server and an interactive desktop — see `ARCHITECTURE.md` for the
-design rationale, and `../../MTPLX_RESOURCE_GOVERNOR_CODEX_BRIEF.md` for
-the full original project spec.
+design rationale.
 
 **Not sure this is for you, or want a non-technical walkthrough?** Read
 [`PLAIN_LANGUAGE_GUIDE.md`](PLAIN_LANGUAGE_GUIDE.md) instead — this file
 assumes you're comfortable with flags, config files, and HTTP APIs.
+
+**Don't have this installed yet?** See [Install](#install) below — this
+feature isn't in the official MTPLX release (PyPI/Homebrew/DMG) yet, only
+on this fork's `feature/resource-governor` branch.
+
+## Install
+
+This feature only exists on
+[`digitalgravy/MTPLX`](https://github.com/digitalgravy/MTPLX), branch
+`feature/resource-governor` — it is **not** in upstream MTPLX or on
+PyPI/Homebrew yet (see `UPSTREAM_STATUS.md`). The top-level `README.md`'s
+"Get it" section (Homebrew, `pip install mtplx`, the DMG) installs
+*vanilla* MTPLX without this feature.
+
+Requirements: same as upstream MTPLX — Apple Silicon (M1 or newer),
+macOS 14+, Python 3.11+. (This fork was developed and tested against
+3.12; if your Mac's default `python3` is newer — e.g. 3.14 — and
+something looks off, try installing with 3.12 or 3.13 instead, since the
+pinned `mlx`/`mlx-lm`/`transformers` versions aren't verified against
+every Python release yet.)
+
+**Option A — quick, `mtplx` CLI only:**
+
+```bash
+python3 -m pip install "mtplx @ git+https://github.com/digitalgravy/MTPLX.git@feature/resource-governor"
+mtplx doctor
+```
+
+If you already have official MTPLX installed, this replaces it in
+whatever Python environment you run the command in — use a fresh
+virtualenv (`python3 -m venv .venv && source .venv/bin/activate` first)
+if you want to keep both side by side. This gets you `mtplx serve
+--resource-profile ...`, the admin API, and CLI/config support — but
+**not** the `mtplx-qos` companion script (see below).
+
+**Option B — full clone, recommended if you want `mtplx-qos` too:**
+
+```bash
+git clone https://github.com/digitalgravy/MTPLX.git
+cd MTPLX
+git checkout feature/resource-governor
+python3 -m pip install -e ".[server]"
+mtplx doctor
+./scripts/mtplx-qos --help
+```
+
+`git pull` later to pick up updates to this branch. `-e` (editable)
+means you're running straight from the checkout, which is also how you'd
+want it if you ever want to read the code the docs are describing.
+
+**Just want `mtplx-qos` after an Option A install?** It's a single
+self-contained script with no dependency on the `mtplx` package — grab
+just that file:
+
+```bash
+curl -o mtplx-qos https://raw.githubusercontent.com/digitalgravy/MTPLX/feature/resource-governor/scripts/mtplx-qos
+chmod +x mtplx-qos
+./mtplx-qos --help
+```
+
+**Verify it worked:**
+
+```bash
+mtplx serve --model <a-model-you-have> --resource-profile interactive &
+curl http://127.0.0.1:8000/admin/resource-governor
+```
+
+You should get back JSON with `"profile": "interactive"` — if you get a
+connection error, the server isn't up yet (give it a moment to load the
+model); if you get a 404, you're running vanilla MTPLX, not this fork
+(double check `pip show mtplx` points at the git install above, not a
+PyPI release).
 
 ## What it actually does today
 
