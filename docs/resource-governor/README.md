@@ -301,6 +301,36 @@ otherwise → `balanced`. The detector list
 `name -> callable`; add an entry to react to other games or apps without
 touching the decision logic.
 
+## Standalone control panel (browser UI)
+
+`scripts/mtplx-qos-ui.html` is a point-and-click alternative to
+`mtplx-qos` for anyone who'd rather not use a terminal — a single
+self-contained HTML file, no build step, no server-side changes, no
+dependency on the `mtplx` package. It talks to the same two admin
+endpoints from your browser via `fetch()`.
+
+Open it directly:
+
+```bash
+open scripts/mtplx-qos-ui.html      # macOS; or just double-click the file
+```
+
+Or grab it standalone, the same way as `mtplx-qos`:
+
+```bash
+curl -o mtplx-qos-ui.html https://raw.githubusercontent.com/digitalgravy/MTPLX/feature/resource-governor/scripts/mtplx-qos-ui.html
+open mtplx-qos-ui.html
+```
+
+It defaults to `http://127.0.0.1:8000` — change the URL field (in the
+"Connection" panel) if your server runs on a different port or another
+machine on your network, and fill in the API key field if the server
+requires one. Both are kept only in that browser's `localStorage`, never
+sent anywhere but the URL you typed. It polls
+`GET /admin/resource-governor` every 3 seconds and shows a clear
+disconnected state if the server isn't reachable, so it's safe to leave
+open in a background tab.
+
 ## Correctness
 
 Pacing changes timing only — deterministic sampling settings produce

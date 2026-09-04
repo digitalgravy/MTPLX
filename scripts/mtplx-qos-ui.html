@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<!--
+  mtplx-qos-ui — standalone control panel for MTPLX's resource governor.
+
+  See docs/resource-governor/ for the full design. This is the point-and-click
+  sibling of scripts/mtplx-qos: same two admin endpoints
+  (GET /admin/resource-governor, POST /admin/resource-governor/profile), no
+  server-side changes, no build step, no dependencies. Just open this file in
+  a browser (double-click it, or `open mtplx-qos-ui.html`) — it talks
+  directly to an already-running `mtplx serve` over HTTP from your browser.
+
+  Nothing here is uploaded anywhere. The server URL and API key you type in
+  are kept only in this browser's localStorage, on this machine.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MTPLX Resource Governor</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f7;
+    --panel: #ffffff;
+    --text: #1a1a1a;
+    --muted: #6b6b70;
+    --border: #dcdce0;
+    --accent: #2f6fed;
+    --accent-text: #ffffff;
+    --ok: #1f9254;
+    --warn: #b4590e;
+    --err: #c4293a;
+    --err-bg: #fdecee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17171a;
+      --panel: #232327;
+      --text: #f0f0f2;
+      --muted: #9b9ba3;
+      --border: #35353b;
+      --accent: #5b8def;
+      --accent-text: #0b0b0c;
+      --ok: #3ecb81;
+      --warn: #e0a13f;
+      --err: #ef5a6f;
+      --err-bg: #3a1c22;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 0;
+    padding: 24px 16px 64px;
+  }
+  main {
+    max-width: 640px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  h1 {
+    font-size: 1.15rem;
+    margin: 0 0 4px;
+  }
+  .subtitle {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin: 0;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  label {
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+  input[type="text"], input[type="password"] {
+    flex: 1;
+    min-width: 160px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 7px 10px;
+    color: var(--text);
+    font-size: 0.85rem;
+  }
+  button {
+    font: inherit;
+    cursor: pointer;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    padding: 8px 12px;
+  }
+  button:hover { filter: brightness(0.97); }
+  button:active { filter: brightness(0.93); }
+  @media (prefers-color-scheme: dark) {
+    button:hover { filter: brightness(1.15); }
+    button:active { filter: brightness(1.3); }
+  }
+  .profiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 10px;
+  }
+  .profile-btn {
+    padding: 14px 10px;
+    text-align: center;
+    font-size: 0.95rem;
+    font-weight: 600;
+  }
+  .profile-btn .hint {
+    display: block;
+    font-weight: 400;
+    font-size: 0.72rem;
+    color: var(--muted);
+    margin-top: 3px;
+  }
+  .profile-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-text);
+  }
+  .profile-btn.active .hint { color: var(--accent-text); opacity: 0.85; }
+  .profile-btn:disabled { opacity: 0.55; cursor: default; }
+  .status-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+  }
+  .dot.ok { background: var(--ok); }
+  .dot.err { background: var(--err); }
+  .lanes {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .lane h3 {
+    margin: 0 0 8px;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--muted);
+  }
+  .metric {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85rem;
+    padding: 3px 0;
+  }
+  .metric .v { font-variant-numeric: tabular-nums; }
+  .error-box {
+    background: var(--err-bg);
+    color: var(--err);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 0.85rem;
+    display: none;
+  }
+  .error-box.visible { display: block; }
+  details summary {
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.75rem;
+    margin-top: 8px;
+  }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <h1>MTPLX Resource Governor</h1>
+    <p class="subtitle">Point-and-click control for the duty-cycle QoS profile on a running <code>mtplx serve</code>.</p>
+  </div>
+
+  <div class="panel">
+    <details id="connDetails">
+      <summary>Connection</summary>
+      <div class="row" style="margin-top:10px;">
+        <label for="baseUrl" style="min-width:34px;">URL</label>
+        <input id="baseUrl" type="text" placeholder="http://127.0.0.1:8000" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <label for="apiKey" style="min-width:34px;">Key</label>
+        <input id="apiKey" type="password" placeholder="only if the server requires one" autocomplete="off" spellcheck="false">
+      </div>
+      <p class="subtitle" style="margin-top:8px;">Stored only in this browser (localStorage), never sent anywhere but the URL above.</p>
+    </details>
+  </div>
+
+  <div id="errorBox" class="error-box"></div>
+
+  <div class="panel">
+    <div class="profiles" id="profileButtons"></div>
+  </div>
+
+  <div class="panel">
+    <div class="status-line" style="margin-bottom:12px;">
+      <span id="connDot" class="dot"></span>
+      <span id="connText">Not connected yet</span>
+      <span style="flex:1;"></span>
+      <button id="refreshBtn" title="Refresh now">Refresh</button>
+    </div>
+    <div class="lanes">
+      <div class="lane">
+        <h3>Prefill</h3>
+        <div class="metric"><span>Duty cycle</span><span class="v" id="prefillDuty">—</span></div>
+        <div class="metric"><span>Steps / yields</span><span class="v" id="prefillSteps">—</span></div>
+      </div>
+      <div class="lane">
+        <h3>Decode</h3>
+        <div class="metric"><span>Duty cycle</span><span class="v" id="decodeDuty">—</span></div>
+        <div class="metric"><span>tok/s natural → delivered</span><span class="v" id="decodeTps">—</span></div>
+        <div class="metric"><span>Steps / yields</span><span class="v" id="decodeSteps">—</span></div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Auto-refreshes every 3s. Same API as <code>scripts/mtplx-qos</code> — see
+    <a href="https://github.com/digitalgravy/MTPLX/blob/feature/resource-governor/docs/resource-governor/README.md">docs/resource-governor/README.md</a>.
+  </footer>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var PROFILES = [
+    { name: "max", hint: "full speed" },
+    { name: "balanced", hint: "middle ground" },
+    { name: "interactive", hint: "protect other apps" },
+    { name: "protect", hint: "no new requests" },
+    { name: "pause", hint: "no new requests" },
+  ];
+  var POLL_MS = 3000;
+
+  var els = {
+    baseUrl: document.getElementById("baseUrl"),
+    apiKey: document.getElementById("apiKey"),
+    connDetails: document.getElementById("connDetails"),
+    errorBox: document.getElementById("errorBox"),
+    profileButtons: document.getElementById("profileButtons"),
+    connDot: document.getElementById("connDot"),
+    connText: document.getElementById("connText"),
+    refreshBtn: document.getElementById("refreshBtn"),
+    prefillDuty: document.getElementById("prefillDuty"),
+    prefillSteps: document.getElementById("prefillSteps"),
+    decodeDuty: document.getElementById("decodeDuty"),
+    decodeTps: document.getElementById("decodeTps"),
+    decodeSteps: document.getElementById("decodeSteps"),
+  };
+
+  var pollTimer = null;
+  var switching = false;
+
+  function storageGet(key, fallback) {
+    try {
+      var v = window.localStorage.getItem(key);
+      return v === null ? fallback : v;
+    } catch (e) {
+      return fallback;
+    }
+  }
+  function storageSet(key, value) {
+    try { window.localStorage.setItem(key, value); } catch (e) { /* ignore */ }
+  }
+
+  els.baseUrl.value = storageGet("mtplx-qos-ui:baseUrl", "http://127.0.0.1:8000");
+  els.apiKey.value = storageGet("mtplx-qos-ui:apiKey", "");
+  if (els.apiKey.value) els.connDetails.open = true;
+
+  els.baseUrl.addEventListener("change", function () {
+    storageSet("mtplx-qos-ui:baseUrl", els.baseUrl.value.trim());
+    refresh();
+  });
+  els.apiKey.addEventListener("change", function () {
+    storageSet("mtplx-qos-ui:apiKey", els.apiKey.value);
+    refresh();
+  });
+
+  function baseUrl() {
+    return (els.baseUrl.value.trim() || "http://127.0.0.1:8000").replace(/\/+$/, "");
+  }
+
+  function apiFetch(path, options) {
+    options = options || {};
+    var headers = Object.assign({}, options.headers || {});
+    var key = els.apiKey.value.trim();
+    if (key) {
+      headers["x-api-key"] = key;
+      headers["Authorization"] = "Bearer " + key;
+    }
+    return fetch(baseUrl() + path, Object.assign({}, options, { headers: headers }));
+  }
+
+  function showError(message) {
+    els.errorBox.textContent = message;
+    els.errorBox.classList.add("visible");
+  }
+  function clearError() {
+    els.errorBox.classList.remove("visible");
+    els.errorBox.textContent = "";
+  }
+
+  function fmtPct(fraction) {
+    if (fraction === null || fraction === undefined) return "—";
+    return Math.round(fraction * 100) + "%";
+  }
+  function fmtTps(v) {
+    if (v === null || v === undefined) return "—";
+    return v.toFixed(1);
+  }
+
+  function renderProfileButtons(activeProfile) {
+    els.profileButtons.innerHTML = "";
+    PROFILES.forEach(function (p) {
+      var btn = document.createElement("button");
+      btn.className = "profile-btn" + (p.name === activeProfile ? " active" : "");
+      btn.disabled = switching;
+      btn.innerHTML = p.name + '<span class="hint">' + p.hint + "</span>";
+      btn.addEventListener("click", function () { setProfile(p.name); });
+      els.profileButtons.appendChild(btn);
+    });
+  }
+
+  function renderStats(data) {
+    clearError();
+    els.connDot.className = "dot ok";
+    els.connText.textContent = "Connected — profile: " + data.profile;
+    renderProfileButtons(data.profile);
+
+    var prefill = data.prefill || {};
+    var decode = data.decode || {};
+    els.prefillDuty.textContent = fmtPct(prefill.effective_duty_cycle);
+    els.prefillSteps.textContent = (prefill.steps || 0) + " / " + (prefill.yields || 0);
+    els.decodeDuty.textContent = fmtPct(decode.effective_duty_cycle);
+    els.decodeTps.textContent = fmtTps(decode.natural_tps_ema) + " → " + fmtTps(decode.delivered_tps_ema);
+    els.decodeSteps.textContent = (decode.steps || 0) + " / " + (decode.yields || 0);
+  }
+
+  function renderDisconnected(message) {
+    els.connDot.className = "dot err";
+    els.connText.textContent = "Not connected";
+    showError(message);
+    renderProfileButtons(null);
+  }
+
+  function refresh() {
+    apiFetch("/admin/resource-governor")
+      .then(function (resp) {
+        if (!resp.ok) {
+          return resp.text().then(function (body) {
+            throw new Error("HTTP " + resp.status + ": " + body.slice(0, 200));
+          });
+        }
+        return resp.json();
+      })
+      .then(renderStats)
+      .catch(function (err) {
+        renderDisconnected(
+          "Could not reach " + baseUrl() + " — is `mtplx serve` running? " +
+          "(" + err.message + ")"
+        );
+      });
+  }
+
+  function setProfile(name) {
+    switching = true;
+    renderProfileButtons(name);
+    apiFetch("/admin/resource-governor/profile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile: name }),
+    })
+      .then(function (resp) {
+        if (!resp.ok) {
+          return resp.text().then(function (body) {
+            throw new Error("HTTP " + resp.status + ": " + body.slice(0, 200));
+          });
+        }
+        return resp.json();
+      })
+      .then(function (data) {
+        switching = false;
+        renderStats(data);
+      })
+      .catch(function (err) {
+        switching = false;
+        renderDisconnected("Failed to switch profile (" + err.message + ")");
+      });
+  }
+
+  els.refreshBtn.addEventListener("click", refresh);
+
+  function startPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(function () {
+      if (!switching) refresh();
+    }, POLL_MS);
+  }
+
+  refresh();
+  startPolling();
+})();
+</script>
+</body>
+</html>

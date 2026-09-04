@@ -78,8 +78,23 @@ are `protect` or `pause`, which stop new work outright.
 
 ## How to turn it on
 
-The easiest way is a small helper tool that comes with this project,
-called `mtplx-qos`. Open Terminal and try:
+**If you'd rather click than type**, there's a small on-screen control
+panel — no Terminal needed. Ask whoever set this up for you where
+`mtplx-qos-ui.html` lives (it's a single file, inside the `scripts`
+folder of the project), then just open it like any other file (double-
+click it, or drag it onto a browser window). You'll see five buttons,
+one per setting above, plus live numbers showing what's happening right
+now. Click a button, it takes effect immediately. If it says "Not
+connected," open the small "Connection" section near the top and check
+the address matches wherever the AI server is running (ask your
+tech-inclined friend if you're not sure).
+
+The rest of this section describes the Terminal alternative, in case
+that's what you already have open — skip it if the button panel above
+covers everything you need.
+
+The easiest terminal way is a small helper tool that comes with this
+project, called `mtplx-qos`. Open Terminal and try:
 
 ```bash
 mtplx-qos interactive

@@ -129,8 +129,9 @@ curl -X POST http://127.0.0.1:8000/admin/resource-governor/profile \
 ```
 
 Five built-in profiles (`max`, `balanced`, `interactive`, `protect`,
-`pause`), a CLI/config/admin-API surface, and the standalone `mtplx-qos`
-policy tool. Full docs, including a plain-language guide for non-technical
+`pause`), a CLI/config/admin-API surface, the standalone `mtplx-qos`
+policy tool, and a point-and-click `scripts/mtplx-qos-ui.html` control
+panel for anyone who'd rather not use `curl`. Full docs, including a plain-language guide for non-technical
 use, are in [`docs/resource-governor/`](docs/resource-governor/README.md)
 — start there, or [`docs/resource-governor/PLAIN_LANGUAGE_GUIDE.md`](docs/resource-governor/PLAIN_LANGUAGE_GUIDE.md)
 if you'd rather skip the technical version. Not yet part of upstream

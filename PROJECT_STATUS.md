@@ -95,14 +95,27 @@ test.
 
 ## Next up
 
-- [ ] Basic web UI for the admin API (requested by user 2026-09-04, so
-      switching profiles doesn't require `curl`). Not designed yet —
-      leaning toward a small static page bundled with `mtplx-qos` rather
-      than touching MTPLX's own existing `/dashboard` frontend, to keep
-      this fork's diff small and avoid coupling to the app's own JS
-      build. Needs a decision on hosting (served by a tiny local
-      webserver `mtplx-qos` spins up vs. a standalone HTML file the user
-      opens directly) before implementing.
+- [x] Basic web UI for the admin API (requested by user 2026-09-04, so
+      switching profiles doesn't require `curl`) — done. Built as
+      `scripts/mtplx-qos-ui.html`: a single self-contained static HTML
+      file (vanilla JS, no build step, no dependency on the `mtplx`
+      package), opened directly in a browser rather than served by a
+      local webserver — decided in favor of "standalone file" since it
+      needs zero extra process to keep alive and matches how `mtplx-qos`
+      itself is already distributed (grab-the-one-file via curl). Calls
+      the same two admin endpoints as `mtplx-qos`
+      (`GET/POST /admin/resource-governor[/profile]`) via `fetch()`;
+      server URL and API key are kept in the browser's own
+      `localStorage`, nothing is sent anywhere else. Live-verified: ran
+      a real `mtplx serve`, opened the page (served over a throwaway
+      local `python3 -m http.server` for the browser test, since a raw
+      `file://` page can't be driven by the browser-automation tool —
+      the shipped file itself needs no server), pointed it at the
+      running server, clicked `interactive`, and confirmed both the UI
+      and `GET /admin/resource-governor` agreed on the new profile.
+      Documented in `docs/resource-governor/README.md` ("Standalone
+      control panel") and `PLAIN_LANGUAGE_GUIDE.md` (click-not-type
+      path added ahead of the `mtplx-qos` CLI instructions).
 - [ ] Runtime-verify (not just statically infer) that mutating
       `state.args.max_active_requests`/`decode_batch_max` live actually
       changes admission behavior on a running server — these two keys are
