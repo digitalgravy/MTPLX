@@ -2,29 +2,86 @@
 
 ## Current objective
 
-**The v0/v1 feature set is complete and documented.** Every phase through
-Phase 7 (core governor, AR/MTP/pipeline decode pacing, all reachable
-prefill functions, runtime admin API, CLI/config integration, basic
-admission enforcement, the `mtplx-qos` companion tool) is done, tested,
-and validated live against a real downloaded model. Full documentation
-suite is written: `docs/resource-governor/README.md` (technical
-reference), `ARCHITECTURE.md` (design rationale), `PLAIN_LANGUAGE_GUIDE.md`
-(non-technical usage guide, requested explicitly by the user),
-`BENCHMARKS.md` (real measurements + what's still needed),
-`UPSTREAM_STATUS.md` (fork tracking), plus the existing
-`IMPLEMENTATION_NOTES.md` engineering log. What remains is genuinely
-out of reach on this dev machine (Phase 8: M5 Ultra tuning + real
-Moonlight test) or deliberately deferred as architecturally riskier
-(deeper memory-pressure admission, the narrow A3B batched lane).
+**The v0/v1 feature set is complete, documented, and now has a first
+real-world Moonlight result.** Every phase through Phase 7 (core
+governor, AR/MTP/pipeline decode pacing, all reachable prefill
+functions, runtime admin API, CLI/config integration, basic admission
+enforcement, the `mtplx-qos` companion tool) is done and tested. Full
+documentation suite is written (`README.md`, `ARCHITECTURE.md`,
+`PLAIN_LANGUAGE_GUIDE.md`, `BENCHMARKS.md`, `UPSTREAM_STATUS.md`, plus
+`IMPLEMENTATION_NOTES.md`). An external community tester installed the
+fork, hit and helped debug three real install/PATH gotchas (all now
+documented — see "Install-flow issues found by a real user" below), and
+then ran an actual Moonlight session: **0.64 FPS (unplayable) at `max` →
+90 FPS decode / 60 FPS rendered at `interactive`**. See
+`BENCHMARKS.md`'s "Real Moonlight test" entry — this is the first actual
+evidence the project's north-star claim holds, even on non-target
+hardware. What remains is genuinely out of reach on this dev machine
+(Phase 8: M5 Ultra tuning + the *full* Moonlight test with target
+hardware and complete metrics) or deliberately deferred as
+architecturally riskier (deeper memory-pressure admission, the narrow
+A3B batched lane) — plus a newly-requested basic UI for the admin API
+(see "In progress").
 
 ## In progress
 
-Nothing — see "Next up" for what's left, all of it either blocked on
-hardware this session doesn't have, or deliberately deferred with
-reasoning recorded below.
+- [ ] Basic web UI for the admin API, requested by the user so a
+      non-technical user doesn't need `curl` to switch profiles. Not
+      started at time of writing — see "Next up".
+
+## Install-flow issues found by a real user (2026-09-04)
+
+An external tester (first person other than this session to install and
+run the fork) hit four real problems in sequence, none of them governor
+bugs — all fixed in docs, and worth keeping listed here since they're
+the kind of thing that will keep recurring for new installers regardless
+of how good the docs get:
+
+1. **PATH shadowing**: official MTPLX installs put a launcher shim on
+   `PATH` that always execs one specific, separately-managed Python
+   environment. A plain `pip install` elsewhere never updates it. Fixed
+   in docs by leading unconditionally with an isolated venv rather than
+   trying to detect/patch the existing install.
+2. **The shim's target location isn't consistent**: the curl installer
+   uses `~/.mtplx/venv`; the Mac App (DMG) uses
+   `~/Library/Application Support/MTPLX/runtime-venv` (app-managed, and
+   risky to touch directly — could get silently reset by the app's own
+   update logic). Confirmed both are real by reading `install_macos.sh`
+   and the tester's own `cat "$(which mtplx)"` output. Docs no longer
+   try to enumerate/guess every possible layout.
+3. **zsh/bash command-hash caching**: even with a venv correctly
+   activated (prompt showing it), a shell that already resolved `mtplx`
+   earlier in the same session can keep using the stale cached location.
+   `hash -r` fixes it; calling the venv's `mtplx` by absolute path
+   sidesteps it entirely and always works.
+4. **Stale background server**: `mtplx serve` correctly refuses to start
+   a second server on an already-bound port (`error: port 8000 is
+   already in use`) rather than silently ignoring new CLI flags — but if
+   you don't notice that error, it looks exactly like "the flag did
+   nothing," because an *earlier* successful `mtplx serve` invocation is
+   still running and answering every request. `mtplx stop` first,
+   then a fresh `mtplx serve --resource-profile ...` applies cleanly.
+   Confirmed by reading `mtplx/commands/public.py`'s port-busy handling
+   directly rather than guessing.
+
+All four are now documented in `docs/resource-governor/README.md`'s
+Install section. None required a code change — they're entirely about
+the gap between "works when I run it" and "works when someone else,
+with their own pre-existing install history and shell session state,
+runs it." Worth remembering for any future user-facing doc: the failure
+mode that actually happens is rarely the one you'd predict from a clean
+test.
 
 ## Next up
 
+- [ ] Basic web UI for the admin API (requested by user 2026-09-04, so
+      switching profiles doesn't require `curl`). Not designed yet —
+      leaning toward a small static page bundled with `mtplx-qos` rather
+      than touching MTPLX's own existing `/dashboard` frontend, to keep
+      this fork's diff small and avoid coupling to the app's own JS
+      build. Needs a decision on hosting (served by a tiny local
+      webserver `mtplx-qos` spins up vs. a standalone HTML file the user
+      opens directly) before implementing.
 - [ ] Runtime-verify (not just statically infer) that mutating
       `state.args.max_active_requests`/`decode_batch_max` live actually
       changes admission behavior on a running server — these two keys are
