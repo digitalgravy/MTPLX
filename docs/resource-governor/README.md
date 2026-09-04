@@ -161,7 +161,14 @@ mode to *limit concurrency*; rely on it to *pace the work that runs*.
 
 ## Quick start
 
-Start the server on a named profile:
+Simplest path — one command starts the server and opens a click-button
+control panel already pointed at it (see "One-command launcher" below):
+
+```bash
+./scripts/mtplx-qos-run --model <your-model>
+```
+
+Or drive the pieces yourself. Start the server on a named profile:
 
 ```bash
 mtplx serve --model <your-model> --resource-profile interactive
@@ -330,6 +337,27 @@ sent anywhere but the URL you typed. It polls
 `GET /admin/resource-governor` every 3 seconds and shows a clear
 disconnected state if the server isn't reachable, so it's safe to leave
 open in a background tab.
+
+## One-command launcher (`mtplx-qos-run`)
+
+`scripts/mtplx-qos-run` starts `mtplx serve` and opens
+`mtplx-qos-ui.html` already pointed at it — for when nothing is running
+yet and you just want the whole thing up in one shot:
+
+```bash
+./scripts/mtplx-qos-run --model <model>
+```
+
+It boots on `interactive` by default (override with `--profile`),
+prefers this clone's own `.venv/bin/mtplx` over whatever `mtplx`
+resolves to on `PATH` (sidestepping the shadowing/hash-caching gotchas
+in "Install" above), waits for `/health` before opening the browser, and
+stops the server on Ctrl-C (or `kill`). `--host`/`--port`/`--api-key`
+tweak the basics; anything after a literal `--` is forwarded straight to
+`mtplx serve` (`--context-window`, etc.). `--help` for the full list.
+The browser is opened via `?url=...` query params on the HTML file —
+that's the same mechanism as the "Connection" panel above, just
+pre-filled instead of typed.
 
 ## Correctness
 

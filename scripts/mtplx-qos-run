@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# mtplx-qos-run — one-command launcher: starts `mtplx serve` with the
+# resource governor active and opens the standalone control panel
+# (mtplx-qos-ui.html) already pointed at it, with nothing to type.
+# See docs/resource-governor/.
+#
+# Usage:
+#   ./scripts/mtplx-qos-run --model <model>
+#   ./scripts/mtplx-qos-run --model <model> --profile balanced --port 8010
+#   ./scripts/mtplx-qos-run --model <model> -- --context-window 32768
+#
+# Everything after a literal `--` is forwarded to `mtplx serve` unchanged.
+# Ctrl+C stops the server this script started.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+UI_FILE="$SCRIPT_DIR/mtplx-qos-ui.html"
+
+MODEL=""
+HOST="127.0.0.1"
+PORT="8000"
+PROFILE="interactive"
+API_KEY=""
+NO_OPEN=0
+EXTRA_ARGS=()
+
+usage() {
+  cat <<'USAGE'
+Usage: mtplx-qos-run --model <model> [options] [-- extra mtplx serve args]
+
+Options:
+  --model <model>       Model id/path to serve (required; same value you'd
+                         pass to `mtplx serve --model`)
+  --host <host>         Bind host (default: 127.0.0.1)
+  --port <port>         Bind port (default: 8000)
+  --profile <profile>   Resource governor profile to start on (default:
+                         interactive — the one you want while gaming; use
+                         max for full speed with no pacing). One of:
+                         max, balanced, interactive, protect, pause.
+  --api-key <key>       Forwarded to `mtplx serve --api-key`, and used to
+                         pre-fill the control panel. Note: this puts the
+                         key in the browser's address bar/history for that
+                         one launch, so prefer --api-key-file (forward it
+                         after `--`) if that matters to you.
+  --no-open             Don't open the browser control panel automatically
+  -h, --help            Show this help
+
+Anything after a literal `--` is passed straight through to `mtplx serve`,
+e.g.:
+  ./scripts/mtplx-qos-run --model foo --port 8010 -- --context-window 32768
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --model) MODEL="$2"; shift 2 ;;
+    --host) HOST="$2"; shift 2 ;;
+    --port) PORT="$2"; shift 2 ;;
+    --profile) PROFILE="$2"; shift 2 ;;
+    --api-key) API_KEY="$2"; shift 2 ;;
+    --no-open) NO_OPEN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; EXTRA_ARGS=("$@"); break ;;
+    *) echo "mtplx-qos-run: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [ -z "$MODEL" ]; then
+  echo "mtplx-qos-run: --model is required (same value you'd pass to \`mtplx serve --model\`)" >&2
+  exit 2
+fi
+
+# Prefer this clone's own isolated venv over whatever `mtplx` resolves to on
+# PATH. This sidesteps the exact PATH-shadowing / stale-shell-hash problems
+# documented in docs/resource-governor/README.md's Install section (another
+# mtplx install shadowing this one, or a shell caching an old resolved path)
+# by never relying on PATH resolution at all when this clone has its own venv.
+if [ -x "$REPO_ROOT/.venv/bin/mtplx" ]; then
+  MTPLX_BIN="$REPO_ROOT/.venv/bin/mtplx"
+elif command -v mtplx >/dev/null 2>&1; then
+  MTPLX_BIN="$(command -v mtplx)"
+  echo "mtplx-qos-run: no $REPO_ROOT/.venv found — using \`mtplx\` from PATH: $MTPLX_BIN" >&2
+else
+  echo "mtplx-qos-run: no mtplx found. Expected $REPO_ROOT/.venv/bin/mtplx" >&2
+  echo "  (from the isolated-venv install) or \`mtplx\` on PATH." >&2
+  echo "  See docs/resource-governor/README.md's Install section." >&2
+  exit 1
+fi
+
+SERVE_ARGS=(serve --model "$MODEL" --host "$HOST" --port "$PORT" --resource-profile "$PROFILE")
+if [ -n "$API_KEY" ]; then
+  SERVE_ARGS+=(--api-key "$API_KEY")
+fi
+# macOS ships bash 3.2, where "${arr[@]}" on a *never-populated* array
+# trips `set -u`'s unbound-variable check (fixed in bash 4.4+) — guard on
+# length instead of expanding an empty EXTRA_ARGS directly.
+if [ "${#EXTRA_ARGS[@]}" -gt 0 ]; then
+  SERVE_ARGS+=("${EXTRA_ARGS[@]}")
+fi
+
+echo "mtplx-qos-run: starting: $MTPLX_BIN ${SERVE_ARGS[*]}"
+"$MTPLX_BIN" "${SERVE_ARGS[@]}" &
+SERVER_PID=$!
+
+cleanup() {
+  if kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo
+    echo "mtplx-qos-run: stopping server (pid $SERVER_PID)..."
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+HEALTH_URL="http://$HOST:$PORT/health"
+echo -n "mtplx-qos-run: waiting for $HEALTH_URL "
+READY=0
+for _ in $(seq 1 120); do
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo
+    echo "mtplx-qos-run: server exited before becoming ready — see the output above." >&2
+    exit 1
+  fi
+  if curl -sf -o /dev/null "$HEALTH_URL" 2>/dev/null; then
+    READY=1
+    break
+  fi
+  echo -n "."
+  sleep 1
+done
+echo
+
+if [ "$READY" -ne 1 ]; then
+  echo "mtplx-qos-run: server didn't become ready within 120s." >&2
+  exit 1
+fi
+
+echo "mtplx-qos-run: server is up, profile=$PROFILE ($HEALTH_URL)"
+
+if [ "$NO_OPEN" -ne 1 ]; then
+  UI_URL="file://$UI_FILE?url=http://$HOST:$PORT"
+  if [ -n "$API_KEY" ]; then
+    UI_URL="$UI_URL&key=$API_KEY"
+  fi
+  if command -v open >/dev/null 2>&1; then
+    open "$UI_URL"
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$UI_URL"
+  else
+    echo "mtplx-qos-run: couldn't find \`open\`/\`xdg-open\` — open this URL yourself:" >&2
+    echo "  $UI_URL" >&2
+  fi
+fi
+
+echo "mtplx-qos-run: press Ctrl+C to stop the server."
+wait "$SERVER_PID"

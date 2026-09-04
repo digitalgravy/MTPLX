@@ -122,6 +122,8 @@ configurable duty cycle, switchable live with no restart and no model
 reload:
 
 ```bash
+./scripts/mtplx-qos-run --model <model>   # starts the server + opens a control panel, one shot
+# ...or drive the pieces yourself:
 mtplx serve --model <model> --resource-profile interactive
 curl -X POST http://127.0.0.1:8000/admin/resource-governor/profile \
   -H 'Content-Type: application/json' -d '{"profile": "balanced"}'
@@ -130,8 +132,9 @@ curl -X POST http://127.0.0.1:8000/admin/resource-governor/profile \
 
 Five built-in profiles (`max`, `balanced`, `interactive`, `protect`,
 `pause`), a CLI/config/admin-API surface, the standalone `mtplx-qos`
-policy tool, and a point-and-click `scripts/mtplx-qos-ui.html` control
-panel for anyone who'd rather not use `curl`. Full docs, including a plain-language guide for non-technical
+policy tool, a point-and-click `scripts/mtplx-qos-ui.html` control
+panel for anyone who'd rather not use `curl`, and `scripts/mtplx-qos-run`
+to start both in one command. Full docs, including a plain-language guide for non-technical
 use, are in [`docs/resource-governor/`](docs/resource-governor/README.md)
 — start there, or [`docs/resource-governor/PLAIN_LANGUAGE_GUIDE.md`](docs/resource-governor/PLAIN_LANGUAGE_GUIDE.md)
 if you'd rather skip the technical version. Not yet part of upstream

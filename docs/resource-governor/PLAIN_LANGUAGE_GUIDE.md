@@ -78,20 +78,38 @@ are `protect` or `pause`, which stop new work outright.
 
 ## How to turn it on
 
-**If you'd rather click than type**, there's a small on-screen control
-panel — no Terminal needed. Ask whoever set this up for you where
-`mtplx-qos-ui.html` lives (it's a single file, inside the `scripts`
-folder of the project), then just open it like any other file (double-
-click it, or drag it onto a browser window). You'll see five buttons,
-one per setting above, plus live numbers showing what's happening right
-now. Click a button, it takes effect immediately. If it says "Not
-connected," open the small "Connection" section near the top and check
-the address matches wherever the AI server is running (ask your
-tech-inclined friend if you're not sure).
+**If nothing is running yet and you just want it all started**, there's
+one command that does everything — starts the AI server with breathing
+room already switched on, and opens the click-button control panel for
+you automatically. One Terminal window, one line, and you never need to
+touch that Terminal window again:
 
-The rest of this section describes the Terminal alternative, in case
-that's what you already have open — skip it if the button panel above
-covers everything you need.
+```bash
+./scripts/mtplx-qos-run --model <model>
+```
+
+(Ask whoever set this up for you what `<model>` should be — it's
+whatever you'd normally pass to start the server.) Leave that window
+open in the background; closing it or pressing Ctrl-C in it stops the
+AI server. Everything else — switching profiles, checking what's
+active — happens in the control panel window it opened for you, not
+back in Terminal.
+
+**If the AI server is already running** (someone else started it, or
+it starts automatically on this Mac), you don't need the command
+above — just the control panel on its own. Ask whoever set this up for
+you where `mtplx-qos-ui.html` lives (it's a single file, inside the
+`scripts` folder of the project), then just open it like any other file
+(double-click it, or drag it onto a browser window). You'll see five
+buttons, one per setting above, plus live numbers showing what's
+happening right now. Click a button, it takes effect immediately. If it
+says "Not connected," open the small "Connection" section near the top
+and check the address matches wherever the AI server is running (ask
+your tech-inclined friend if you're not sure).
+
+The rest of this section describes the Terminal-only alternative, in
+case that's what you already have open — skip it if either of the two
+options above covers everything you need.
 
 The easiest terminal way is a small helper tool that comes with this
 project, called `mtplx-qos`. Open Terminal and try:

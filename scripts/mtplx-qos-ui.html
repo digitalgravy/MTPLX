@@ -297,6 +297,21 @@
 
   els.baseUrl.value = storageGet("mtplx-qos-ui:baseUrl", "http://127.0.0.1:8000");
   els.apiKey.value = storageGet("mtplx-qos-ui:apiKey", "");
+
+  // A launcher (e.g. scripts/mtplx-qos-run) can hand us ?url=...&key=...
+  // in the address bar so the page opens already pointed at the server it
+  // just started, with nothing to type. These override localStorage and
+  // are themselves persisted, so a plain reload afterwards keeps working.
+  var launchParams = new URLSearchParams(window.location.search);
+  if (launchParams.has("url") && launchParams.get("url").trim()) {
+    els.baseUrl.value = launchParams.get("url").trim();
+    storageSet("mtplx-qos-ui:baseUrl", els.baseUrl.value);
+  }
+  if (launchParams.has("key")) {
+    els.apiKey.value = launchParams.get("key");
+    storageSet("mtplx-qos-ui:apiKey", els.apiKey.value);
+  }
+
   if (els.apiKey.value) els.connDetails.open = true;
 
   els.baseUrl.addEventListener("change", function () {

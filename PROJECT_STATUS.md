@@ -22,14 +22,13 @@ hardware. What remains is genuinely out of reach on this dev machine
 (Phase 8: M5 Ultra tuning + the *full* Moonlight test with target
 hardware and complete metrics) or deliberately deferred as
 architecturally riskier (deeper memory-pressure admission, the narrow
-A3B batched lane) — plus a newly-requested basic UI for the admin API
-(see "In progress").
+A3B batched lane). Also newly done: a click-button admin-API UI
+(`scripts/mtplx-qos-ui.html`) and a one-command launcher
+(`scripts/mtplx-qos-run`) — see "Next up" for details.
 
 ## In progress
 
-- [ ] Basic web UI for the admin API, requested by the user so a
-      non-technical user doesn't need `curl` to switch profiles. Not
-      started at time of writing — see "Next up".
+Nothing currently in progress.
 
 ## Install-flow issues found by a real user (2026-09-04)
 
@@ -116,6 +115,38 @@ test.
       Documented in `docs/resource-governor/README.md` ("Standalone
       control panel") and `PLAIN_LANGUAGE_GUIDE.md` (click-not-type
       path added ahead of the `mtplx-qos` CLI instructions).
+- [x] One-command launcher (requested by user 2026-09-04, "a one-command
+      run script that spins it all up for him") — done. Built as
+      `scripts/mtplx-qos-run`: a bash script that starts `mtplx serve`
+      (defaulting to `--resource-profile interactive`, overridable),
+      polls `/health`, then opens `mtplx-qos-ui.html` via `?url=...`
+      query params so the control panel is already connected with
+      nothing to type (the HTML file was extended to read `?url=`/`?key=`
+      on load and persist them to `localStorage`, same as a manual edit).
+      Prefers this clone's own `.venv/bin/mtplx` over `PATH` resolution
+      entirely, to sidestep the exact shadowing/hash-caching problems the
+      external tester hit (see "Install-flow issues" above) rather than
+      just documenting around them. Ctrl-C/`kill` stops the server via a
+      trap that kills the child PID.
+      Hit and fixed one real bug while testing: `EXTRA_ARGS=()` (the
+      `--` passthrough array) plus `set -u` triggers "unbound variable"
+      on macOS's stock bash 3.2 when expanded with `"${EXTRA_ARGS[@]}"`
+      even after explicit empty-initialization — a documented bash <4.4
+      quirk, not present in bash 4+. Fixed by guarding on
+      `${#EXTRA_ARGS[@]} -gt 0` before expanding, which is safe on 3.2.
+      Live-verified end-to-end (real model load, `/admin/resource-governor`
+      correctly reporting `interactive` with `steps:0`) and the shutdown
+      path specifically: sending SIGINT to the script while it's a
+      *backgrounded* job of a non-interactive shell did nothing (that's
+      correct, standard POSIX behavior — non-interactive shells set
+      SIGINT to ignored for async commands, confirmed with an isolated
+      repro script before concluding it wasn't a real bug), but sending
+      SIGINT to it running as a normal foreground command killed the
+      server cleanly (exit 130, as expected for Ctrl-C) — the realistic
+      case, since nobody runs this via manual `&` backgrounding.
+      Documented in `docs/resource-governor/README.md` ("One-command
+      launcher" + "Quick start") and `PLAIN_LANGUAGE_GUIDE.md` (now the
+      first, easiest option in "How to turn it on").
 - [ ] Runtime-verify (not just statically infer) that mutating
       `state.args.max_active_requests`/`decode_batch_max` live actually
       changes admission behavior on a running server — these two keys are
